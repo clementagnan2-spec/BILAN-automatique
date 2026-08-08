@@ -32,14 +32,33 @@ type `CtaCptSoldeDébit("42*")`).
 | `CtaCptSoldeDébit("50*","56*")` | Avec **deux racines**, ce n'est pas une union mais une **plage** : tous les comptes dont la racine est comprise entre 50 et 56 inclus |
 | `CtaCptSolde("280*","2869*")` | Solde **net** (débit − crédit, sans filtrage de sens), utile pour soustraire des amortissements/provisions |
 | `CtaCptSoldeNm1(...)` | Idem, sur la Balance N-1 |
+| `[Rxxx.EtLoc]=<formule>` | Marque la cellule comme "rubrique Rxxx" réutilisable ailleurs (ex. pour un TOTAL qui additionne plusieurs sous-totaux déjà calculés) |
+| `[Rxxx.EtLoc]` (dans une autre formule) | Réutilise la valeur déjà calculée de la rubrique Rxxx (ex. `TOTAL I = [R120.EtLoc]+[R130.EtLoc]+...`) |
 
 Le solde d'un compte est calculé comme **Débit − Crédit** sur les lignes de
 la balance importée (les lignes en double pour un même compte sont
 additionnées automatiquement).
 
-Une formule non reconnue (référence externe, fonction inconnue) est
-signalée dans le journal de résultat sans bloquer le reste du calcul — la
-cellule correspondante affiche `#ERREUR`.
+Le moteur résout les formules en **plusieurs passes** : une cellule qui
+référence une rubrique `[Rxxx.EtLoc]` pas encore calculée est simplement
+recalculée à la passe suivante, jusqu'à convergence — l'ordre des lignes
+dans le modèle n'a donc pas besoin d'être parfait.
+
+Une formule non reconnue (référence externe non gérée, fonction inconnue)
+est signalée dans le journal de résultat sans bloquer le reste du calcul —
+la cellule correspondante affiche `#ERREUR`.
+
+## Formats de modèle acceptés
+
+Le modèle de Bilan peut être fourni en :
+- **`.xlsx`** natif (recommandé)
+- **`.xls`** au format XML "Excel 2003 Spreadsheet" (export courant depuis
+  certains logiciels comptables) — le logiciel le convertit automatiquement,
+  sans dépendance externe à installer.
+
+Le nom de la feuille contenant les formules n'a pas besoin de s'appeler
+`BILAN` : si cette feuille n'existe pas, le logiciel utilise automatiquement
+la feuille qui contient le plus de formules `CtaCptSolde...`.
 
 ## Utilisation en local (sans passer par l'exe)
 

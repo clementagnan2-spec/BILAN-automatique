@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -246,40 +247,69 @@ _FUNC_TOKENS = [
     ("CtaCptSolde", "__F_SOLDE__"),
 ]
 
+# Certains modèles (liasse fiscale complète) balisent une cellule comme
+# "rubrique" réutilisable ailleurs : la cellule s'écrit
+#   =[R120.EtLoc]=-CtaCptSolde("10*")
+# ce qui signifie : "cette cellule EST la rubrique R120, et sa valeur vaut
+# -CtaCptSolde('10*')". D'autres cellules peuvent ensuite réutiliser cette
+# valeur déjà calculée via [R120.EtLoc], par exemple :
+#   =[R201.EtLoc]=[R120.EtLoc]+[R130.EtLoc]+...
+_RUBRIQUE_REF_RE = re.compile(r"\[R([A-Za-z0-9]+)\.EtLoc\]")
+_RUBRIQUE_ASSIGN_RE = re.compile(r"^\[R([A-Za-z0-9]+)\.EtLoc\]=(.*)$")
+
 
 class FormulaError(Exception):
     pass
 
 
+class RubriqueNotReady(Exception):
+    """Levée quand une formule référence une rubrique [Rxxx.EtLoc] pas
+    encore calculée (dépendance vers une autre cellule) : on réessaiera
+    lors d'une passe ultérieure."""
+    pass
+
+
 def is_formula(value) -> bool:
-    return isinstance(value, str) and value.strip().startswith("=") and "CtaCptSolde" in value
+    if not isinstance(value, str):
+        return False
+    v = value.strip()
+    if not v.startswith("="):
+        return False
+    return ("CtaCptSolde" in v) or bool(_RUBRIQUE_REF_RE.search(v))
 
 
-def evaluate_formula(formula: str, balance_n: Balance, balance_n1: Balance):
-    """Évalue une formule du modèle de Bilan (chaîne commençant par '=')
-    et renvoie la valeur numérique calculée.
+def _prepare_expr(formula: str):
+    """Découpe une formule en (rubrique_id_ou_None, expression_python_prête).
 
-    Les formules non reconnues (ex : références externes du type
-    [R200.EtLoc] laissées par un ancien modèle de liasse) lèvent une
-    FormulaError plutôt que de faire planter tout le traitement."""
+    - Extrait le tag `[Rxxx.EtLoc]=` en tête de formule s'il existe.
+    - Remplace les références `[Ryyy.EtLoc]` par un appel `__RUB__('Ryyy')`.
+    - Remplace les noms de fonctions CtaCptSolde... par leurs tokens internes.
+    """
     expr = formula.strip()
     if expr.startswith("="):
         expr = expr[1:]
 
-    if "[" in expr or "]" in expr:
-        raise FormulaError("Référence externe non prise en charge : %s" % formula)
+    rubrique_id = None
+    m = _RUBRIQUE_ASSIGN_RE.match(expr)
+    if m:
+        rubrique_id = "R" + m.group(1)
+        expr = m.group(2)
 
-    py_expr = expr
+    expr = _RUBRIQUE_REF_RE.sub(lambda mo: "__RUB__(%r)" % ("R" + mo.group(1)), expr)
+
     for name, token in _FUNC_TOKENS:
-        py_expr = py_expr.replace(name, token)
+        expr = expr.replace(name, token)
 
-    if "CtaCptSolde" in py_expr:
+    if "CtaCptSolde" in expr:
         raise FormulaError("Fonction non reconnue : %s" % formula)
-    # il ne doit rester aucune lettre en dehors de nos tokens internes __F_..__
-    leftover = re.sub(r"__F_[A-Z0-9_]+__", "", py_expr)
+    leftover = re.sub(r"__F_[A-Z0-9_]+__|__RUB__\([^)]*\)", "", expr)
     if re.search(r"[A-Za-zÀ-ÿ]", leftover):
         raise FormulaError("Fonction ou référence non reconnue : %s" % formula)
 
+    return rubrique_id, expr
+
+
+def _make_namespace(balance_n: "Balance", balance_n1: "Balance", rubrique_values: dict):
     def F_debit(*prefixes):
         return cta_cpt_solde_debit(balance_n, *prefixes)
 
@@ -298,24 +328,185 @@ def evaluate_formula(formula: str, balance_n: Balance, balance_n1: Balance):
     def F_solde_nm1(*prefixes):
         return cta_cpt_solde(balance_n1, *prefixes)
 
-    safe_globals = {"__builtins__": {}}
-    safe_locals = {
+    def RUB(rubrique_id):
+        if rubrique_id not in rubrique_values:
+            raise RubriqueNotReady(rubrique_id)
+        return rubrique_values[rubrique_id]
+
+    return {
         "__F_DEBIT__": F_debit,
         "__F_CREDIT__": F_credit,
         "__F_SOLDE__": F_solde,
         "__F_DEBIT_NM1__": F_debit_nm1,
         "__F_CREDIT_NM1__": F_credit_nm1,
         "__F_SOLDE_NM1__": F_solde_nm1,
+        "__RUB__": RUB,
     }
 
+
+def evaluate_formula(formula: str, balance_n: "Balance", balance_n1: "Balance", rubrique_values: dict = None):
+    """Évalue une formule isolée (sans dépendance de rubrique, ou avec des
+    rubriques déjà connues dans `rubrique_values`). Renvoie la valeur
+    numérique calculée. Lève FormulaError ou RubriqueNotReady."""
+    rubrique_values = rubrique_values if rubrique_values is not None else {}
+    rubrique_id, py_expr = _prepare_expr(formula)
+    namespace = _make_namespace(balance_n, balance_n1, rubrique_values)
     try:
-        return eval(py_expr, safe_globals, safe_locals)  # noqa: S307 (namespace restreint)
+        value = eval(py_expr, {"__builtins__": {}}, namespace)  # noqa: S307 (namespace restreint)
+    except RubriqueNotReady:
+        raise
     except Exception as e:
         raise FormulaError("Erreur d'évaluation (%s) : %s" % (formula, e))
+    return value, rubrique_id
+
+
+def evaluate_sheet_formulas(ws, balance_n: "Balance", balance_n1: "Balance"):
+    """Évalue toutes les cellules-formules d'une feuille en plusieurs passes,
+    pour résoudre les dépendances entre cellules liées par des rubriques
+    [Rxxx.EtLoc]. Renvoie (results, errors) :
+      results = {(row,col): valeur}
+      errors  = [(coord, formule, message)]
+    """
+    pending = []  # (cell, formula)
+    for row in ws.iter_rows():
+        for cell in row:
+            if is_formula(cell.value):
+                pending.append((cell, cell.value))
+
+    rubrique_values = {}
+    results = {}
+    errors = []
+
+    max_passes = len(pending) + 2
+    for _ in range(max_passes):
+        if not pending:
+            break
+        still_pending = []
+        progress = False
+        for cell, formula in pending:
+            try:
+                value, rubrique_id = evaluate_formula(formula, balance_n, balance_n1, rubrique_values)
+            except RubriqueNotReady:
+                still_pending.append((cell, formula))
+                continue
+            except FormulaError as e:
+                errors.append((cell.coordinate, formula, str(e)))
+                progress = True
+                continue
+            results[cell.coordinate] = value
+            if rubrique_id:
+                rubrique_values[rubrique_id] = value
+            progress = True
+        pending = still_pending
+        if not progress:
+            break
+
+    # tout ce qui reste bloqué après convergence = rubrique introuvable
+    for cell, formula in pending:
+        errors.append((cell.coordinate, formula, "Rubrique référencée jamais calculée (dépendance manquante)"))
+
+    return results, errors
 
 
 # --------------------------------------------------------------------------
-# 4. Génération du classeur Bilan à partir d'un modèle
+# 4. Chargement d'un modèle Excel (xlsx natif, ou vieux format XML "SpreadsheetML")
+# --------------------------------------------------------------------------
+
+_SS_NS = "urn:schemas-microsoft-com:office:spreadsheet"
+
+
+def _is_spreadsheetml(path: str) -> bool:
+    """Détecte le vieux format Excel 2003 'XML Spreadsheet' (souvent avec
+    l'extension .xls alors que ce n'est pas un vrai classeur binaire)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(300)
+        head_txt = head.decode("utf-8", errors="ignore")
+        return "<?xml" in head_txt and ("mso-application" in head_txt or "Workbook" in head_txt)
+    except Exception:
+        return False
+
+
+def _spreadsheetml_to_workbook(path: str) -> openpyxl.Workbook:
+    """Convertit un fichier XML SpreadsheetML (Excel 2003) en classeur
+    openpyxl équivalent (valeurs et formules-texte), sans dépendance externe."""
+    tree = ET.parse(path)
+    root = tree.getroot()
+
+    wb_out = openpyxl.Workbook()
+    wb_out.remove(wb_out.active)
+
+    def tag(name):
+        return "{%s}%s" % (_SS_NS, name)
+
+    for ws_el in root.findall(tag("Worksheet")):
+        sheet_name = ws_el.get(tag("Name")) or "Sheet"
+        ws_out = wb_out.create_sheet(title=sheet_name[:31])
+        table = ws_el.find(tag("Table"))
+        if table is None:
+            continue
+
+        row_idx = 0
+        for row_el in table.findall(tag("Row")):
+            idx_attr = row_el.get(tag("Index"))
+            row_idx = int(idx_attr) if idx_attr else row_idx + 1
+
+            col_idx = 0
+            for cell_el in row_el.findall(tag("Cell")):
+                idx_attr = cell_el.get(tag("Index"))
+                col_idx = int(idx_attr) if idx_attr else col_idx + 1
+
+                data_el = cell_el.find(tag("Data"))
+                if data_el is not None:
+                    val = data_el.text
+                    dtype = data_el.get(tag("Type"), "String")
+                    if val is not None and dtype == "Number":
+                        try:
+                            fval = float(val)
+                            val = int(fval) if fval.is_integer() else fval
+                        except ValueError:
+                            pass
+                    if val is not None:
+                        ws_out.cell(row=row_idx, column=col_idx, value=val)
+
+                span = cell_el.get(tag("MergeAcross"))
+                if span:
+                    col_idx += int(span)
+
+    return wb_out
+
+
+def open_template_workbook(template_path: str) -> openpyxl.Workbook:
+    """Ouvre un modèle de Bilan quel que soit son format (.xlsx natif, ou
+    ancien export XML 'SpreadsheetML' souvent nommé .xls)."""
+    if _is_spreadsheetml(template_path):
+        return _spreadsheetml_to_workbook(template_path)
+    return openpyxl.load_workbook(template_path, data_only=False)
+
+
+def _guess_bilan_sheet(wb: openpyxl.Workbook, preferred: str = "BILAN") -> str:
+    if preferred in wb.sheetnames:
+        return preferred
+    # sinon, la feuille qui contient le plus de cellules-formules CtaCptSolde...
+    best_name, best_count = None, -1
+    for name in wb.sheetnames:
+        count = 0
+        for row in wb[name].iter_rows():
+            for cell in row:
+                if is_formula(cell.value):
+                    count += 1
+        if count > best_count:
+            best_name, best_count = name, count
+    if best_count <= 0:
+        raise ValueError(
+            "Aucune feuille du modèle ne contient de formules CtaCptSolde... "
+            "Vérifiez le fichier modèle."
+        )
+    return best_name
+
+
+# --------------------------------------------------------------------------
+# 5. Génération du classeur Bilan à partir d'un modèle
 # --------------------------------------------------------------------------
 
 @dataclass
@@ -331,42 +522,33 @@ def generate_bilan(template_path: str, balance_n1_path: str, balance_n_path: str
                     bilan_sheet: str = "BILAN") -> GenerationReport:
     """Génère le fichier Bilan à partir du modèle et des deux balances.
 
-    - template_path : classeur .xlsx contenant la feuille "BILAN" avec les
-      formules CtaCptSolde... (les autres feuilles du modèle, s'il y en a,
-      sont recopiées telles quelles).
+    - template_path : classeur contenant la feuille de Bilan avec les
+      formules CtaCptSolde... Accepte un .xlsx natif ou un ancien export XML
+      "SpreadsheetML" (souvent avec extension .xls). Les autres feuilles du
+      modèle, s'il y en a, sont recopiées telles quelles.
     - balance_n1_path / balance_n_path : fichiers de balance (xlsx/csv) à
       importer, avec colonnes Compte / Libellé / Débit / Crédit.
     - output_path : fichier .xlsx de sortie.
+    - bilan_sheet : nom de la feuille contenant le Bilan dans le modèle ;
+      si introuvable, la feuille la plus riche en formules CtaCptSolde...
+      est utilisée automatiquement.
     """
     balance_n1 = load_balance(balance_n1_path, sheet_name=sheet_n1)
     balance_n = load_balance(balance_n_path, sheet_name=sheet_n)
 
-    shutil.copy(template_path, output_path)
-    wb = openpyxl.load_workbook(output_path, data_only=False)
-
-    if bilan_sheet not in wb.sheetnames:
-        raise ValueError("La feuille '%s' est introuvable dans le modèle." % bilan_sheet)
+    wb = open_template_workbook(template_path)
+    actual_sheet = _guess_bilan_sheet(wb, preferred=bilan_sheet)
 
     report = GenerationReport(output_path=output_path)
-    ws = wb[bilan_sheet]
+    ws = wb[actual_sheet]
 
-    for row in ws.iter_rows():
-        for cell in row:
-            val = cell.value
-            if is_formula(val):
-                try:
-                    result = evaluate_formula(val, balance_n, balance_n1)
-                    cell.value = result
-                    report.cells_ok += 1
-                except FormulaError as e:
-                    report.cells_error.append((bilan_sheet, cell.coordinate, val, str(e)))
-                    cell.value = "#ERREUR"
-
-    # On remplace aussi, par commodité, les feuilles BALANCE par les
-    # nouvelles données importées (traçabilité), si ces feuilles existent
-    # dans le modèle et si on veut les régénérer -> on laisse le modèle
-    # inchangé sur ce point pour ne pas dénaturer un modèle personnalisé ;
-    # seule la feuille BILAN est recalculée.
+    results, errors = evaluate_sheet_formulas(ws, balance_n, balance_n1)
+    for coord, value in results.items():
+        ws[coord] = value
+    report.cells_ok = len(results)
+    for coord, formula, msg in errors:
+        report.cells_error.append((actual_sheet, coord, formula, msg))
+        ws[coord] = "#ERREUR"
 
     wb.save(output_path)
     return report
