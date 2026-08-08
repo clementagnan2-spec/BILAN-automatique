@@ -7,19 +7,22 @@ partir de leurs modèles Excel respectifs, en appliquant les formules
 CtaCptSolde... et les rubriques [xxx.EtLoc].
 """
 
+import io
 import os
 import shutil
 import sys
+import tempfile
 import traceback
 import webbrowser
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import openpyxl
 from openpyxl.utils import get_column_letter
 
 import core
+import security
 
 APP_TITLE = "États Financiers Automatiques"
 APP_VERSION = "2.0"
@@ -37,7 +40,9 @@ def user_config_dir() -> str:
     modèles modifiés par l'utilisateur via le menu PARAMÈTRES. Contrairement
     au dossier `resources` embarqué dans l'exe (extrait dans un dossier
     temporaire à chaque lancement), ce dossier survit d'un lancement à
-    l'autre."""
+    l'autre. Les fichiers qui y sont écrits sont CHIFFRÉS (voir security.py)
+    — pas de .xlsx en clair, pour qu'un utilisateur qui ouvrirait ce dossier
+    dans l'Explorateur ne puisse pas lire les formules avec Excel."""
     if getattr(sys, "frozen", False):
         base = os.path.dirname(sys.executable)
     else:
@@ -47,35 +52,67 @@ def user_config_dir() -> str:
     return d
 
 
-def get_active_template_path(etat_id: str) -> str:
-    """Renvoie le chemin du modèle actuellement actif pour cet état : la
-    version personnalisée si elle existe déjà, sinon une copie du modèle par
-    défaut embarqué est créée dans le dossier personnalisable et renvoyée."""
+def _custom_dat_path(etat_id: str) -> str:
     for etat in core.ETATS:
-        if etat["id"] != etat_id:
-            continue
-        custom_path = os.path.join(user_config_dir(), etat["resource"])
-        if os.path.exists(custom_path):
-            return custom_path
-        default_path = resource_path(os.path.join("resources", etat["resource"]))
-        if os.path.exists(default_path):
-            shutil.copy(default_path, custom_path)
-            return custom_path
-        return ""
+        if etat["id"] == etat_id:
+            stem = os.path.splitext(etat["resource"])[0]
+            return os.path.join(user_config_dir(), stem + ".dat")
     return ""
 
 
-def restore_default_template(etat_id: str) -> str:
-    """Écrase le modèle personnalisé par le modèle d'origine embarqué."""
+def has_custom_template(etat_id: str) -> bool:
+    path = _custom_dat_path(etat_id)
+    return bool(path) and os.path.exists(path)
+
+
+def load_active_workbook(etat_id: str) -> openpyxl.Workbook:
+    """Charge en mémoire le classeur actif pour cet état : la version
+    personnalisée (déchiffrée) si elle existe, sinon le modèle par défaut
+    embarqué."""
+    dat_path = _custom_dat_path(etat_id)
+    if dat_path and os.path.exists(dat_path):
+        with open(dat_path, "rb") as f:
+            encrypted = f.read()
+        decrypted = security.decrypt_bytes(encrypted)
+        return openpyxl.load_workbook(io.BytesIO(decrypted), data_only=False)
+
     for etat in core.ETATS:
-        if etat["id"] != etat_id:
-            continue
-        custom_path = os.path.join(user_config_dir(), etat["resource"])
-        default_path = resource_path(os.path.join("resources", etat["resource"]))
-        if os.path.exists(default_path):
-            shutil.copy(default_path, custom_path)
-        return custom_path
-    return ""
+        if etat["id"] == etat_id:
+            default_path = resource_path(os.path.join("resources", etat["resource"]))
+            return core.open_template_workbook(default_path)
+    raise ValueError("État inconnu : %s" % etat_id)
+
+
+def save_custom_workbook(etat_id: str, wb: openpyxl.Workbook) -> None:
+    """Enregistre le classeur (chiffré) comme modèle personnalisé de cet état."""
+    buf = io.BytesIO()
+    wb.save(buf)
+    encrypted = security.encrypt_bytes(buf.getvalue())
+    dat_path = _custom_dat_path(etat_id)
+    os.makedirs(os.path.dirname(dat_path), exist_ok=True)
+    with open(dat_path, "wb") as f:
+        f.write(encrypted)
+
+
+def restore_default_template(etat_id: str) -> None:
+    """Supprime le modèle personnalisé : l'état revient au modèle d'origine
+    embarqué (rien n'est jamais écrit en clair sur disque pour ça)."""
+    dat_path = _custom_dat_path(etat_id)
+    if dat_path and os.path.exists(dat_path):
+        os.remove(dat_path)
+
+
+def materialize_temp_template(etat_id: str):
+    """Écrit temporairement (en clair) le classeur actif dans un dossier
+    temporaire système, pour que le moteur `core` — qui lit des fichiers sur
+    disque — puisse le traiter. Renvoie (chemin_fichier, dossier_a_nettoyer) ;
+    l'appelant doit supprimer `dossier_a_nettoyer` une fois la génération
+    terminée (le fichier ne doit pas persister après usage)."""
+    wb = load_active_workbook(etat_id)
+    tmp_dir = tempfile.mkdtemp(prefix="etatsfin_")
+    tmp_path = os.path.join(tmp_dir, "modele.xlsx")
+    wb.save(tmp_path)
+    return tmp_path, tmp_dir
 
 
 class TemplateEditorWindow(tk.Toplevel):
@@ -89,7 +126,6 @@ class TemplateEditorWindow(tk.Toplevel):
         self.parent_app = parent
         self.etat_id = etat_id
         self.etat_meta = next(e for e in core.ETATS if e["id"] == etat_id)
-        self.template_path = get_active_template_path(etat_id)
 
         self.title(f"PARAMÈTRES — Modèle : {self.etat_meta['label']}")
         self.geometry("1100x650")
@@ -104,9 +140,10 @@ class TemplateEditorWindow(tk.Toplevel):
         toolbar = ttk.Frame(self)
         toolbar.pack(fill="x", padx=8, pady=8)
 
+        origin = "personnalisé (enregistré)" if has_custom_template(self.etat_id) else "par défaut (intégré)"
         ttk.Label(
             toolbar,
-            text=f"Modèle : {self.template_path}",
+            text=f"État : {self.etat_meta['label']}  —  Modèle {origin}",
             foreground="#666666",
         ).pack(side="left")
 
@@ -150,11 +187,11 @@ class TemplateEditorWindow(tk.Toplevel):
 
     # ------------------------------------------------------------------
     def _load_workbook(self):
-        if not self.template_path or not os.path.exists(self.template_path):
-            self.status_var.set("Modèle introuvable.")
+        try:
+            wb = load_active_workbook(self.etat_id)
+        except Exception as e:
+            self.status_var.set(f"Erreur de chargement du modèle : {e}")
             return
-
-        wb = openpyxl.load_workbook(self.template_path, data_only=False)
         self.sheet_name = self._guess_sheet(wb)
         ws = wb[self.sheet_name]
 
@@ -187,24 +224,24 @@ class TemplateEditorWindow(tk.Toplevel):
 
     # ------------------------------------------------------------------
     def _on_save(self):
-        if not self.template_path:
-            return
         try:
-            wb = openpyxl.load_workbook(self.template_path, data_only=False)
+            wb = load_active_workbook(self.etat_id)
             ws = wb[self.sheet_name]
             for (r, c), var in self.entries.items():
                 text = var.get()
                 ws.cell(row=r, column=c).value = text if text != "" else None
-            wb.save(self.template_path)
+            save_custom_workbook(self.etat_id, wb)
         except Exception as e:
             messagebox.showerror("PARAMÈTRES", f"Échec de l'enregistrement :\n{e}")
             return
 
         # le modèle actif de la fenêtre principale doit refléter cette édition
         if self.etat_id in self.parent_app.template_vars:
-            self.parent_app.template_vars[self.etat_id].set(self.template_path)
+            self.parent_app.template_vars[self.etat_id].set("")  # "" = utiliser le modèle actif (personnalisé)
+        if self.etat_id in self.parent_app.template_labels:
+            self.parent_app.template_labels[self.etat_id].set("Modèle personnalisé (enregistré)")
 
-        self.status_var.set("Modèle enregistré.")
+        self.status_var.set("Modèle enregistré (chiffré).")
         messagebox.showinfo("PARAMÈTRES", "Le modèle a été enregistré. "
                                            "Il sera utilisé à la prochaine génération.")
 
@@ -214,13 +251,15 @@ class TemplateEditorWindow(tk.Toplevel):
                 "Restaurer le modèle d'origine ? Toutes vos modifications personnalisées "
                 "pour cet état seront perdues."):
             return
-        self.template_path = restore_default_template(self.etat_id)
+        restore_default_template(self.etat_id)
         for widget in self.grid_frame.winfo_children():
             widget.destroy()
         self.entries.clear()
         self._load_workbook()
         if self.etat_id in self.parent_app.template_vars:
-            self.parent_app.template_vars[self.etat_id].set(self.template_path)
+            self.parent_app.template_vars[self.etat_id].set("")
+        if self.etat_id in self.parent_app.template_labels:
+            self.parent_app.template_labels[self.etat_id].set("Modèle par défaut (intégré)")
         self.status_var.set("Modèle d'origine restauré.")
 
 
@@ -236,9 +275,12 @@ class EtatsApp(tk.Tk):
         self.output_dir = tk.StringVar()
         self.status_var = tk.StringVar(value="Prêt.")
 
-        # une case à cocher + un champ "modèle personnalisé" par état
-        self.etat_vars = {}       # id -> BooleanVar (généré ou non)
-        self.template_vars = {}   # id -> StringVar (chemin modèle, vide = défaut intégré)
+        # une case à cocher + un état par état
+        self.etat_vars = {}         # id -> BooleanVar (généré ou non)
+        self.template_vars = {}     # id -> StringVar ("" = modèle actif interne, sinon chemin externe choisi)
+        self.template_labels = {}   # id -> StringVar (texte affiché : "par défaut" / "personnalisé" / chemin externe)
+
+        self._params_unlocked = False  # se reverrouille à chaque relance du logiciel
 
         self._build_menu()
         self._build_ui()
@@ -253,19 +295,42 @@ class EtatsApp(tk.Tk):
                 label=etat["label"],
                 command=lambda eid=etat["id"]: self._open_template_editor(eid),
             )
+        parametres_menu.add_separator()
+        parametres_menu.add_command(label="Verrouiller", command=self._lock_parametres)
         menubar.add_cascade(label="PARAMÈTRES", menu=parametres_menu)
 
         self.config(menu=menubar)
 
+    def _lock_parametres(self):
+        self._params_unlocked = False
+        messagebox.showinfo("PARAMÈTRES", "Accès reverrouillé.")
+
+    def _ensure_unlocked(self) -> bool:
+        """Demande le mot de passe du mois si l'accès à PARAMÈTRES n'a pas
+        déjà été déverrouillé dans cette session. Renvoie True si l'accès
+        est autorisé."""
+        if self._params_unlocked:
+            return True
+        pwd = simpledialog.askstring(
+            "PARAMÈTRES — Accès protégé",
+            "Mot de passe du mois en cours :",
+            show="*",
+            parent=self,
+        )
+        if pwd is None:
+            return False  # annulé
+        if security.check_password(pwd):
+            self._params_unlocked = True
+            return True
+        messagebox.showerror("PARAMÈTRES", "Mot de passe incorrect.")
+        return False
+
     def _open_template_editor(self, etat_id: str):
+        if not self._ensure_unlocked():
+            return
         TemplateEditorWindow(self, etat_id)
 
     # ------------------------------------------------------------------
-    def _default_template(self, etat_id: str) -> str:
-        # Utilise le modèle personnalisé (édité via PARAMÈTRES) s'il existe,
-        # sinon le crée à partir du modèle par défaut embarqué.
-        path = get_active_template_path(etat_id)
-        return path if path and os.path.exists(path) else ""
 
     def _build_ui(self):
         pad = {"padx": 10, "pady": 6}
@@ -301,17 +366,20 @@ class EtatsApp(tk.Tk):
             self.etat_vars[etat["id"]] = var
             ttk.Checkbutton(row, text=etat["label"], variable=var, width=32).pack(side="left")
 
-            tvar = tk.StringVar(value=self._default_template(etat["id"]))
-            self.template_vars[etat["id"]] = tvar
-            entry = ttk.Entry(row, textvariable=tvar)
-            entry.pack(side="left", fill="x", expand=True, padx=6)
-            ttk.Button(row, text="Modèle…",
+            self.template_vars[etat["id"]] = tk.StringVar(value="")  # "" = modèle actif interne
+            label_text = ("Modèle personnalisé (enregistré)" if has_custom_template(etat["id"])
+                          else "Modèle par défaut (intégré)")
+            lvar = tk.StringVar(value=label_text)
+            self.template_labels[etat["id"]] = lvar
+            ttk.Label(row, textvariable=lvar, foreground="#666666", width=32).pack(
+                side="left", fill="x", expand=True, padx=6)
+            ttk.Button(row, text="Modèle externe…",
                        command=lambda eid=etat["id"]: self._choose_template(eid)).pack(side="left")
 
         ttk.Label(
             frame_etats,
-            text="Un modèle par défaut est déjà intégré pour chaque état. "
-                 "Cliquez sur « Modèle… » uniquement pour le remplacer par le vôtre.",
+            text="Le modèle par défaut (ou celui édité via PARAMÈTRES) est utilisé automatiquement. "
+                 "« Modèle externe… » permet de charger ponctuellement un autre fichier (accès protégé).",
             foreground="#666666",
         ).pack(anchor="w", padx=8, pady=(0, 6))
 
@@ -367,12 +435,15 @@ class EtatsApp(tk.Tk):
                 self.output_dir.set(os.path.join(os.path.dirname(path), "Etats_financiers"))
 
     def _choose_template(self, etat_id: str):
+        if not self._ensure_unlocked():
+            return
         path = filedialog.askopenfilename(
             title="Choisir le modèle",
             filetypes=[("Classeurs Excel", "*.xlsx *.xls"), ("Tous les fichiers", "*.*")],
         )
         if path:
             self.template_vars[etat_id].set(path)
+            self.template_labels[etat_id].set(f"Modèle externe : {os.path.basename(path)}")
 
     def _choose_output_dir(self):
         path = filedialog.askdirectory(title="Choisir le dossier de sortie")
@@ -408,33 +479,54 @@ class EtatsApp(tk.Tk):
             messagebox.showerror(APP_TITLE, "Sélectionnez au moins un état à générer.")
             return
 
+        # Prépare les modèles : un fichier externe explicitement choisi est
+        # utilisé tel quel ; sinon, le modèle actif (personnalisé chiffré, ou
+        # par défaut) est déchiffré dans un fichier temporaire qui sera
+        # supprimé juste après la génération.
         templates = {}
+        temp_dirs_to_clean = []
         for eid in selected_ids:
-            tpath = self.template_vars[eid].get().strip()
-            if not tpath or not os.path.exists(tpath):
-                messagebox.showerror(APP_TITLE, f"Modèle introuvable pour l'état « {eid} ».")
-                return
-            templates[eid] = tpath
+            external = self.template_vars[eid].get().strip()
+            if external:
+                if not os.path.exists(external):
+                    messagebox.showerror(APP_TITLE, f"Modèle externe introuvable pour « {eid} ».")
+                    return
+                templates[eid] = external
+            else:
+                try:
+                    tmp_path, tmp_dir = materialize_temp_template(eid)
+                except Exception as e:
+                    messagebox.showerror(APP_TITLE, f"Impossible de charger le modèle pour « {eid} » :\n{e}")
+                    for d in temp_dirs_to_clean:
+                        shutil.rmtree(d, ignore_errors=True)
+                    return
+                templates[eid] = tmp_path
+                temp_dirs_to_clean.append(tmp_dir)
 
         self.status_var.set("Génération en cours…")
         self.generate_btn.configure(state="disabled")
         self.update_idletasks()
 
         try:
-            results = core.generate_all_etats(
-                balance_n1_path=n1,
-                balance_n_path=n,
-                output_dir=out_dir,
-                templates=templates,
-                selected_ids=selected_ids,
-            )
-        except Exception as e:
-            self._log("ERREUR : " + str(e), clear=True)
-            self._log(traceback.format_exc())
-            messagebox.showerror(APP_TITLE, f"Échec de la génération :\n{e}")
-            self.status_var.set("Échec.")
-            self.generate_btn.configure(state="normal")
-            return
+            try:
+                results = core.generate_all_etats(
+                    balance_n1_path=n1,
+                    balance_n_path=n,
+                    output_dir=out_dir,
+                    templates=templates,
+                    selected_ids=selected_ids,
+                )
+            except Exception as e:
+                self._log("ERREUR : " + str(e), clear=True)
+                self._log(traceback.format_exc())
+                messagebox.showerror(APP_TITLE, f"Échec de la génération :\n{e}")
+                self.status_var.set("Échec.")
+                self.generate_btn.configure(state="normal")
+                return
+        finally:
+            # les fichiers-modèles déchiffrés en clair ne doivent jamais persister
+            for d in temp_dirs_to_clean:
+                shutil.rmtree(d, ignore_errors=True)
 
         self._log(f"Dossier de sortie : {out_dir}", clear=True)
         self._log("")

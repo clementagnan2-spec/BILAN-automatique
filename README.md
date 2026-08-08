@@ -133,6 +133,58 @@ bilan-auto/
 └── README.md
 ```
 
+## Protection par mot de passe — formules cachées aux utilisateurs
+
+Le menu **PARAMÈTRES** (et le bouton « Modèle externe… ») est protégé par
+un mot de passe qui **change automatiquement chaque mois**, sans connexion
+internet. Sans ce mot de passe, un utilisateur ne peut ni voir ni modifier
+les formules des 4 modèles — il peut seulement importer ses balances et
+générer les états.
+
+### Avant de diffuser le logiciel
+
+1. Ouvrez `security.py` et changez la valeur de `SECRET_KEY` pour une
+   valeur que vous seul connaissez. Ne la communiquez à personne, ne la
+   publiez jamais (si votre dépôt GitHub est public, gardez ce fichier
+   dans un dépôt **privé**, ou changez la clé très régulièrement).
+2. Recompilez l'exe (poussez sur GitHub — voir plus haut).
+
+### Connaître le mot de passe du mois
+
+Exécutez, sur votre poste (pas besoin de l'installer chez vos
+utilisateurs) :
+```bash
+python generer_mot_de_passe.py
+```
+Cela affiche le mot de passe du mois en cours et des 2 mois suivants (pour
+pouvoir prévenir vos utilisateurs à l'avance). Communiquez-leur uniquement
+le mot de passe du mois en cours, par le canal de votre choix (SMS, appel,
+etc.) — **ne l'incluez jamais dans le logiciel lui-même**.
+
+`generer_mot_de_passe.py` n'est jamais inclus dans le `.exe` généré (il
+n'est pas importé par `main.py`), donc vos utilisateurs n'y ont pas accès
+même s'ils examinent les fichiers du logiciel.
+
+### Modèles personnalisés chiffrés sur disque
+
+Si vous modifiez un modèle via PARAMÈTRES, il est enregistré **chiffré**
+dans un dossier `modeles_personnalises/` créé à côté de l'exécutable — pas
+en `.xlsx` en clair. Un utilisateur qui ouvrirait ce dossier dans
+l'Explorateur Windows ne trouvera que des fichiers `.dat` illisibles, pas
+ouvrables dans Excel.
+
+### Limite honnête de cette protection
+
+Ce mécanisme est un **frein pratique** contre un utilisateur non technique
+curieux — ce n'est pas un coffre-fort cryptographique de niveau
+professionnel. Le fichier `.exe` contient nécessairement `security.py`
+(donc `SECRET_KEY`) pour pouvoir vérifier le mot de passe hors-ligne ; une
+personne avec des compétences en rétro-ingénierie de binaires Python
+pourrait théoriquement l'extraire. Pour une protection réellement
+inviolable, il faudrait une vérification côté serveur, ce qui dépasse le
+cadre d'un logiciel de bureau autonome. Pour l'usage décrit (empêcher des
+utilisateurs classiques de voir les formules), c'est largement suffisant.
+
 ## Faire évoluer le modèle de Bilan
 
 Le modèle n'est pas codé en dur : le moteur lit **n'importe quelle**
