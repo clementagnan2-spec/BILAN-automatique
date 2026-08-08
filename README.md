@@ -137,8 +137,28 @@ bilan-auto/
 
 Le modèle n'est pas codé en dur : le moteur lit **n'importe quelle**
 cellule commençant par `=` et contenant une des fonctions `CtaCptSolde...`,
-où qu'elle se trouve dans la feuille `BILAN`. Pour ajouter une ligne au
-Bilan (ex. immobilisations, capitaux propres), il suffit d'ouvrir
-`resources/modele_bilan.xlsx` dans Excel, d'ajouter la ligne avec le
-libellé et la formule voulue, en respectant la syntaxe ci-dessus — aucune
-modification du code n'est nécessaire.
+où qu'elle se trouve dans la feuille. Pour ajouter une ligne à un état
+(ex. immobilisations, capitaux propres), il suffit d'ouvrir le modèle dans
+Excel, d'ajouter la ligne avec le libellé et la formule voulue, en
+respectant la syntaxe ci-dessus — aucune modification du code n'est
+nécessaire.
+
+## Menu PARAMÈTRES — modifier les modèles directement dans le logiciel
+
+Pas besoin d'Excel : le menu **PARAMÈTRES**, en haut de la fenêtre, liste
+les 4 états. Cliquer sur l'un d'eux ouvre une grille (comme un mini-tableur)
+affichant toutes les cellules du modèle — libellés et formules, colonnes
+année N **et** année N-1 comprises.
+
+- Modifiez n'importe quelle cellule (un libellé, ou une formule comme
+  `=CtaCptSoldeDébit("42*")`, `=CtaCptSoldeDébitNm1("42*")` pour le N-1, ou
+  une rubrique `=[011.EtLoc]=...`).
+- **Enregistrer** sauvegarde le modèle dans un dossier `modeles_personnalises/`
+  créé à côté de l'exécutable — vos modifications sont donc conservées
+  d'un lancement à l'autre du logiciel, et utilisées automatiquement à la
+  prochaine génération.
+- **Restaurer le modèle d'origine** annule vos modifications et revient au
+  modèle intégré par défaut pour cet état.
+
+Le champ « Modèle… » de l'écran principal reste disponible pour charger
+ponctuellement un fichier externe différent, sans passer par PARAMÈTRES.

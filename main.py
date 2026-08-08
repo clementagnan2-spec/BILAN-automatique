@@ -8,12 +8,16 @@ CtaCptSolde... et les rubriques [xxx.EtLoc].
 """
 
 import os
+import shutil
 import sys
 import traceback
 import webbrowser
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+
+import openpyxl
+from openpyxl.utils import get_column_letter
 
 import core
 
@@ -26,6 +30,198 @@ def resource_path(relative_path: str) -> str:
     (onefile) où les fichiers sont extraits dans un dossier temporaire."""
     base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_path, relative_path)
+
+
+def user_config_dir() -> str:
+    """Dossier persistant (à côté de l'exécutable) où sont enregistrés les
+    modèles modifiés par l'utilisateur via le menu PARAMÈTRES. Contrairement
+    au dossier `resources` embarqué dans l'exe (extrait dans un dossier
+    temporaire à chaque lancement), ce dossier survit d'un lancement à
+    l'autre."""
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    d = os.path.join(base, "modeles_personnalises")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def get_active_template_path(etat_id: str) -> str:
+    """Renvoie le chemin du modèle actuellement actif pour cet état : la
+    version personnalisée si elle existe déjà, sinon une copie du modèle par
+    défaut embarqué est créée dans le dossier personnalisable et renvoyée."""
+    for etat in core.ETATS:
+        if etat["id"] != etat_id:
+            continue
+        custom_path = os.path.join(user_config_dir(), etat["resource"])
+        if os.path.exists(custom_path):
+            return custom_path
+        default_path = resource_path(os.path.join("resources", etat["resource"]))
+        if os.path.exists(default_path):
+            shutil.copy(default_path, custom_path)
+            return custom_path
+        return ""
+    return ""
+
+
+def restore_default_template(etat_id: str) -> str:
+    """Écrase le modèle personnalisé par le modèle d'origine embarqué."""
+    for etat in core.ETATS:
+        if etat["id"] != etat_id:
+            continue
+        custom_path = os.path.join(user_config_dir(), etat["resource"])
+        default_path = resource_path(os.path.join("resources", etat["resource"]))
+        if os.path.exists(default_path):
+            shutil.copy(default_path, custom_path)
+        return custom_path
+    return ""
+
+
+class TemplateEditorWindow(tk.Toplevel):
+    """Fenêtre d'édition en grille d'un modèle d'état financier : affiche
+    toutes les cellules (libellés ET formules CtaCptSolde.../rubriques,
+    colonnes N comme N-1) dans une grille modifiable, avec enregistrement
+    persistant."""
+
+    def __init__(self, parent, etat_id: str):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.etat_id = etat_id
+        self.etat_meta = next(e for e in core.ETATS if e["id"] == etat_id)
+        self.template_path = get_active_template_path(etat_id)
+
+        self.title(f"PARAMÈTRES — Modèle : {self.etat_meta['label']}")
+        self.geometry("1100x650")
+        self.entries = {}  # (row, col) -> tk.StringVar
+        self.sheet_name = None
+
+        self._build_ui()
+        self._load_workbook()
+
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        toolbar = ttk.Frame(self)
+        toolbar.pack(fill="x", padx=8, pady=8)
+
+        ttk.Label(
+            toolbar,
+            text=f"Modèle : {self.template_path}",
+            foreground="#666666",
+        ).pack(side="left")
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(btns, text="💾 Enregistrer", command=self._on_save).pack(side="left")
+        ttk.Button(btns, text="↺ Restaurer le modèle d'origine",
+                   command=self._on_restore).pack(side="left", padx=8)
+        ttk.Button(btns, text="Fermer", command=self.destroy).pack(side="left")
+
+        ttk.Label(
+            self,
+            text="Modifiez librement les libellés ou les formules (ex. =CtaCptSoldeDébit(\"42*\"), "
+                 "=CtaCptSoldeDébitNm1(\"42*\") pour l'année N-1, =[011.EtLoc]=... pour une rubrique). "
+                 "Cliquez sur Enregistrer pour appliquer les changements.",
+            wraplength=1060, justify="left", foreground="#444444",
+        ).pack(anchor="w", padx=8, pady=(0, 6))
+
+        # zone défilante contenant la grille
+        container = ttk.Frame(self)
+        container.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        self.canvas = tk.Canvas(container, borderwidth=0)
+        vscroll = ttk.Scrollbar(container, orient="vertical", command=self.canvas.yview)
+        hscroll = ttk.Scrollbar(container, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=vscroll.set, xscrollcommand=hscroll.set)
+
+        vscroll.pack(side="right", fill="y")
+        hscroll.pack(side="bottom", fill="x")
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        self.grid_frame = ttk.Frame(self.canvas)
+        self.canvas_window = self.canvas.create_window((0, 0), window=self.grid_frame, anchor="nw")
+        self.grid_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
+        )
+
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w").pack(fill="x", side="bottom")
+
+    # ------------------------------------------------------------------
+    def _load_workbook(self):
+        if not self.template_path or not os.path.exists(self.template_path):
+            self.status_var.set("Modèle introuvable.")
+            return
+
+        wb = openpyxl.load_workbook(self.template_path, data_only=False)
+        self.sheet_name = self._guess_sheet(wb)
+        ws = wb[self.sheet_name]
+
+        max_row = max(ws.max_row, 1)
+        max_col = max(ws.max_column, 1)
+
+        # en-têtes de colonnes (A, B, C...)
+        ttk.Label(self.grid_frame, text="", width=5).grid(row=0, column=0)
+        for c in range(1, max_col + 1):
+            ttk.Label(self.grid_frame, text=get_column_letter(c), font=("Segoe UI", 9, "bold"),
+                      width=28, anchor="center", relief="ridge").grid(row=0, column=c, sticky="nsew")
+
+        for r in range(1, max_row + 1):
+            ttk.Label(self.grid_frame, text=str(r), font=("Segoe UI", 9, "bold"),
+                      width=5, anchor="center", relief="ridge").grid(row=r, column=0, sticky="nsew")
+            for c in range(1, max_col + 1):
+                cell = ws.cell(row=r, column=c)
+                var = tk.StringVar(value="" if cell.value is None else str(cell.value))
+                entry = tk.Entry(self.grid_frame, textvariable=var, width=28)
+                entry.grid(row=r, column=c, sticky="nsew", padx=1, pady=1)
+                self.entries[(r, c)] = var
+
+        self.status_var.set(f"Feuille : {self.sheet_name} — {max_row} lignes × {max_col} colonnes.")
+
+    def _guess_sheet(self, wb) -> str:
+        preferred = self.etat_meta["sheet_hint"]
+        if preferred in wb.sheetnames:
+            return preferred
+        return wb.sheetnames[0]
+
+    # ------------------------------------------------------------------
+    def _on_save(self):
+        if not self.template_path:
+            return
+        try:
+            wb = openpyxl.load_workbook(self.template_path, data_only=False)
+            ws = wb[self.sheet_name]
+            for (r, c), var in self.entries.items():
+                text = var.get()
+                ws.cell(row=r, column=c).value = text if text != "" else None
+            wb.save(self.template_path)
+        except Exception as e:
+            messagebox.showerror("PARAMÈTRES", f"Échec de l'enregistrement :\n{e}")
+            return
+
+        # le modèle actif de la fenêtre principale doit refléter cette édition
+        if self.etat_id in self.parent_app.template_vars:
+            self.parent_app.template_vars[self.etat_id].set(self.template_path)
+
+        self.status_var.set("Modèle enregistré.")
+        messagebox.showinfo("PARAMÈTRES", "Le modèle a été enregistré. "
+                                           "Il sera utilisé à la prochaine génération.")
+
+    def _on_restore(self):
+        if not messagebox.askyesno(
+                "PARAMÈTRES",
+                "Restaurer le modèle d'origine ? Toutes vos modifications personnalisées "
+                "pour cet état seront perdues."):
+            return
+        self.template_path = restore_default_template(self.etat_id)
+        for widget in self.grid_frame.winfo_children():
+            widget.destroy()
+        self.entries.clear()
+        self._load_workbook()
+        if self.etat_id in self.parent_app.template_vars:
+            self.parent_app.template_vars[self.etat_id].set(self.template_path)
+        self.status_var.set("Modèle d'origine restauré.")
 
 
 class EtatsApp(tk.Tk):
@@ -44,15 +240,32 @@ class EtatsApp(tk.Tk):
         self.etat_vars = {}       # id -> BooleanVar (généré ou non)
         self.template_vars = {}   # id -> StringVar (chemin modèle, vide = défaut intégré)
 
+        self._build_menu()
         self._build_ui()
 
     # ------------------------------------------------------------------
-    def _default_template(self, etat_id: str) -> str:
+    def _build_menu(self):
+        menubar = tk.Menu(self)
+
+        parametres_menu = tk.Menu(menubar, tearoff=0)
         for etat in core.ETATS:
-            if etat["id"] == etat_id:
-                path = resource_path(os.path.join("resources", etat["resource"]))
-                return path if os.path.exists(path) else ""
-        return ""
+            parametres_menu.add_command(
+                label=etat["label"],
+                command=lambda eid=etat["id"]: self._open_template_editor(eid),
+            )
+        menubar.add_cascade(label="PARAMÈTRES", menu=parametres_menu)
+
+        self.config(menu=menubar)
+
+    def _open_template_editor(self, etat_id: str):
+        TemplateEditorWindow(self, etat_id)
+
+    # ------------------------------------------------------------------
+    def _default_template(self, etat_id: str) -> str:
+        # Utilise le modèle personnalisé (édité via PARAMÈTRES) s'il existe,
+        # sinon le crée à partir du modèle par défaut embarqué.
+        path = get_active_template_path(etat_id)
+        return path if path and os.path.exists(path) else ""
 
     def _build_ui(self):
         pad = {"padx": 10, "pady": 6}
