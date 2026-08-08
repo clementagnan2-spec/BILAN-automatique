@@ -1,25 +1,32 @@
-# Bilan Automatique
+# États Financiers Automatiques
 
-Logiciel de bureau (Windows, `.exe`) qui génère automatiquement le **Bilan**
-à partir de deux balances comptables (**Balance N-1** et **Balance N**),
-en appliquant le modèle Excel fourni (feuille `BILAN` avec des formules du
-type `CtaCptSoldeDébit("42*")`).
+Logiciel de bureau (Windows, `.exe`) qui génère automatiquement **4 états
+financiers** à partir de deux balances comptables (**Balance N-1** et
+**Balance N**), en appliquant les modèles Excel fournis :
+
+- **Bilan**
+- **Compte de Résultat (SIG)**
+- **Situation Financière (FR-BFR-TN)**
+- **Flux de Trésorerie (TFT)**
+
+Chaque modèle contient des cellules-formules du type
+`CtaCptSoldeDébit("42*")` et des « rubriques » réutilisables
+`[xxx.EtLoc]=...`.
 
 ## Comment ça marche
 
 1. Vous importez :
-   - un **modèle** de Bilan (`.xlsx`) contenant une feuille `BILAN` avec des
-     cellules-formules `CtaCptSoldeDébit(...)`, `CtaCptSoldeCrédit(...)`,
-     `CtaCptSoldeDébitNm1(...)`, `CtaCptSoldeCréditNm1(...)`,
-     `CtaCptSolde(...)`, `CtaCptSoldeNm1(...)`. Un modèle par défaut est déjà
-     intégré au logiciel (basé sur `resources/modele_bilan.xlsx`) — vous
-     pouvez le remplacer par le vôtre si votre présentation évolue.
    - la **Balance N-1** (fichier Excel ou CSV avec les colonnes `Compte`,
      `Libellé`, `Débit`, `Crédit`)
    - la **Balance N** (même format)
-2. Vous cliquez sur **Générer le Bilan**.
-3. Le logiciel calcule chaque cellule-formule du modèle et enregistre un
-   nouveau classeur Excel avec les montants calculés, prêt à l'emploi.
+   - vous cochez les états que vous voulez générer (les 4 modèles par
+     défaut sont déjà intégrés au logiciel — vous pouvez remplacer chacun
+     par le vôtre si besoin)
+2. Vous cliquez sur **Générer les états sélectionnés**.
+3. Le logiciel calcule chaque cellule-formule de chaque modèle sélectionné
+   et enregistre un fichier Excel par état, dans le dossier de sortie
+   choisi : `Bilan.xlsx`, `Compte_de_Resultat.xlsx`,
+   `Situation_Financiere.xlsx`, `Flux_de_Tresorerie.xlsx`.
 
 ## Logique des formules
 
@@ -44,9 +51,17 @@ référence une rubrique `[Rxxx.EtLoc]` pas encore calculée est simplement
 recalculée à la passe suivante, jusqu'à convergence — l'ordre des lignes
 dans le modèle n'a donc pas besoin d'être parfait.
 
-Une formule non reconnue (référence externe non gérée, fonction inconnue)
-est signalée dans le journal de résultat sans bloquer le reste du calcul —
-la cellule correspondante affiche `#ERREUR`.
+Une formule non reconnue (référence externe non gérée, fonction inconnue —
+ex. la fonction `Ratio(...)` utilisée une fois dans le modèle "Situation
+Financière" fourni, qui n'appartient pas au langage `CtaCptSolde...`) est
+signalée dans le journal de résultat sans bloquer le reste du calcul — la
+cellule correspondante affiche `#ERREUR`.
+
+Si une rubrique est référencée mais n'est **jamais définie nulle part**
+dans le modèle (trou dans le modèle, ex. une ligne supprimée par erreur),
+elle est traitée comme **0** plutôt que de bloquer toute la chaîne de
+calcul qui en dépend — un avertissement le signale dans le journal, sans
+empêcher la génération du reste de l'état.
 
 ## Formats de modèle acceptés
 
@@ -84,33 +99,37 @@ compilation croisée). Ce dépôt contient un **workflow GitHub Actions**
    ```
 2. Dans l'onglet **Actions** du dépôt GitHub, le workflow *Build Windows EXE*
    se déclenche automatiquement. Une fois terminé (quelques minutes),
-   téléchargez l'exécutable dans l'artifact **BilanAutomatique-windows**.
+   téléchargez l'exécutable dans l'artifact **EtatsFinanciers-windows**.
 3. Pour publier une **release** téléchargeable directement (avec un lien
    fixe), créez un tag de version :
    ```bash
    git tag v1.0.0
    git push origin v1.0.0
    ```
-   Le workflow attachera alors `BilanAutomatique.exe` à la release GitHub
+   Le workflow attachera alors `EtatsFinanciers.exe` à la release GitHub
    correspondante.
 
 ## Compilation locale (si vous avez un PC Windows sous la main)
 
 ```bash
 pip install -r requirements.txt
-pyinstaller --noconfirm --onefile --windowed --name "BilanAutomatique" --add-data "resources;resources" main.py
+pyinstaller --noconfirm --onefile --windowed --name "EtatsFinanciers" --add-data "resources;resources" main.py
 ```
-L'exécutable est généré dans `dist/BilanAutomatique.exe`.
+L'exécutable est généré dans `dist/EtatsFinanciers.exe`.
 
 ## Structure du projet
 
 ```
 bilan-auto/
-├── main.py                        interface graphique (Tkinter)
-├── core.py                        moteur de calcul (formules CtaCptSolde...)
-├── resources/modele_bilan.xlsx    modèle de Bilan par défaut
+├── main.py                              interface graphique (Tkinter)
+├── core.py                              moteur de calcul (formules CtaCptSolde...)
+├── resources/
+│   ├── modele_bilan.xlsx                modèle Bilan par défaut
+│   ├── modele_resultat.xlsx             modèle Compte de Résultat (SIG) par défaut
+│   ├── modele_situation.xlsx            modèle Situation Financière (FR-BFR-TN) par défaut
+│   └── modele_flux.xlsx                 modèle Flux de Trésorerie (TFT) par défaut
 ├── requirements.txt
-├── .github/workflows/build.yml    build automatique de l'exe (GitHub Actions)
+├── .github/workflows/build.yml          build automatique de l'exe (GitHub Actions)
 └── README.md
 ```
 

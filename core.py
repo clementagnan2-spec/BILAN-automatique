@@ -249,13 +249,19 @@ _FUNC_TOKENS = [
 
 # Certains modèles (liasse fiscale complète) balisent une cellule comme
 # "rubrique" réutilisable ailleurs : la cellule s'écrit
-#   =[R120.EtLoc]=-CtaCptSolde("10*")
-# ce qui signifie : "cette cellule EST la rubrique R120, et sa valeur vaut
-# -CtaCptSolde('10*')". D'autres cellules peuvent ensuite réutiliser cette
-# valeur déjà calculée via [R120.EtLoc], par exemple :
+#   =[R120.EtLoc]=-CtaCptSolde("10*")     (modèle Bilan)
+#   =[011.EtLoc]=-CtaCptSolde("70*")      (modèles Résultat / Trésorerie...)
+# ce qui signifie : "cette cellule EST la rubrique <id>, et sa valeur vaut
+# <formule>". D'autres cellules peuvent ensuite réutiliser cette valeur déjà
+# calculée via [<id>.EtLoc], par exemple :
 #   =[R201.EtLoc]=[R120.EtLoc]+[R130.EtLoc]+...
-_RUBRIQUE_REF_RE = re.compile(r"\[R([A-Za-z0-9]+)\.EtLoc\]")
-_RUBRIQUE_ASSIGN_RE = re.compile(r"^\[R([A-Za-z0-9]+)\.EtLoc\]=(.*)$")
+# L'identifiant de rubrique est utilisé tel quel (avec ou sans "R"), et n'a
+# pas besoin d'être unique dans tout le classeur : en cas de réutilisation
+# du même identifiant sur plusieurs lignes, la dernière définition
+# rencontrée (dans l'ordre des lignes) fait foi pour les références
+# suivantes — ce qui correspond à l'intention des modèles observés.
+_RUBRIQUE_REF_RE = re.compile(r"\[([A-Za-z0-9]+)\.EtLoc\]")
+_RUBRIQUE_ASSIGN_RE = re.compile(r"^\[([A-Za-z0-9]+)\.EtLoc\]=(.*)$")
 
 
 class FormulaError(Exception):
@@ -292,10 +298,10 @@ def _prepare_expr(formula: str):
     rubrique_id = None
     m = _RUBRIQUE_ASSIGN_RE.match(expr)
     if m:
-        rubrique_id = "R" + m.group(1)
+        rubrique_id = m.group(1)
         expr = m.group(2)
 
-    expr = _RUBRIQUE_REF_RE.sub(lambda mo: "__RUB__(%r)" % ("R" + mo.group(1)), expr)
+    expr = _RUBRIQUE_REF_RE.sub(lambda mo: "__RUB__(%r)" % mo.group(1), expr)
 
     for name, token in _FUNC_TOKENS:
         expr = expr.replace(name, token)
@@ -309,7 +315,8 @@ def _prepare_expr(formula: str):
     return rubrique_id, expr
 
 
-def _make_namespace(balance_n: "Balance", balance_n1: "Balance", rubrique_values: dict):
+def _make_namespace(balance_n: "Balance", balance_n1: "Balance", rubrique_values: dict,
+                     defined_ids: set = None, missing_used: set = None):
     def F_debit(*prefixes):
         return cta_cpt_solde_debit(balance_n, *prefixes)
 
@@ -329,9 +336,16 @@ def _make_namespace(balance_n: "Balance", balance_n1: "Balance", rubrique_values
         return cta_cpt_solde(balance_n1, *prefixes)
 
     def RUB(rubrique_id):
-        if rubrique_id not in rubrique_values:
-            raise RubriqueNotReady(rubrique_id)
-        return rubrique_values[rubrique_id]
+        if rubrique_id in rubrique_values:
+            return rubrique_values[rubrique_id]
+        if defined_ids is not None and rubrique_id not in defined_ids:
+            # Rubrique jamais définie nulle part dans la feuille (trou dans
+            # le modèle, ex. ligne supprimée) : on la traite comme 0 plutôt
+            # que de bloquer toute la chaîne de calcul qui en dépend.
+            if missing_used is not None:
+                missing_used.add(rubrique_id)
+            return 0
+        raise RubriqueNotReady(rubrique_id)
 
     return {
         "__F_DEBIT__": F_debit,
@@ -344,13 +358,14 @@ def _make_namespace(balance_n: "Balance", balance_n1: "Balance", rubrique_values
     }
 
 
-def evaluate_formula(formula: str, balance_n: "Balance", balance_n1: "Balance", rubrique_values: dict = None):
+def evaluate_formula(formula: str, balance_n: "Balance", balance_n1: "Balance", rubrique_values: dict = None,
+                      defined_ids: set = None, missing_used: set = None):
     """Évalue une formule isolée (sans dépendance de rubrique, ou avec des
     rubriques déjà connues dans `rubrique_values`). Renvoie la valeur
     numérique calculée. Lève FormulaError ou RubriqueNotReady."""
     rubrique_values = rubrique_values if rubrique_values is not None else {}
     rubrique_id, py_expr = _prepare_expr(formula)
-    namespace = _make_namespace(balance_n, balance_n1, rubrique_values)
+    namespace = _make_namespace(balance_n, balance_n1, rubrique_values, defined_ids, missing_used)
     try:
         value = eval(py_expr, {"__builtins__": {}}, namespace)  # noqa: S307 (namespace restreint)
     except RubriqueNotReady:
@@ -363,9 +378,10 @@ def evaluate_formula(formula: str, balance_n: "Balance", balance_n1: "Balance", 
 def evaluate_sheet_formulas(ws, balance_n: "Balance", balance_n1: "Balance"):
     """Évalue toutes les cellules-formules d'une feuille en plusieurs passes,
     pour résoudre les dépendances entre cellules liées par des rubriques
-    [Rxxx.EtLoc]. Renvoie (results, errors) :
-      results = {(row,col): valeur}
-      errors  = [(coord, formule, message)]
+    [xxx.EtLoc]. Renvoie (results, errors, warnings) :
+      results  = {coord: valeur}
+      errors   = [(coord, formule, message)]
+      warnings = [(coord, formule, message)]  (ex. rubrique jamais définie, traitée comme 0)
     """
     pending = []  # (cell, formula)
     for row in ws.iter_rows():
@@ -373,9 +389,21 @@ def evaluate_sheet_formulas(ws, balance_n: "Balance", balance_n1: "Balance"):
             if is_formula(cell.value):
                 pending.append((cell, cell.value))
 
+    # Recense à l'avance tous les identifiants de rubrique qui SERONT définis
+    # quelque part dans la feuille, pour distinguer "pas encore calculé"
+    # (on réessaie à la passe suivante) de "n'existe nulle part" (trou dans
+    # le modèle -> valeur par défaut 0, avec un avertissement).
+    defined_ids = set()
+    for _cell, formula in pending:
+        m = _RUBRIQUE_ASSIGN_RE.match(formula.strip()[1:] if formula.strip().startswith("=") else formula.strip())
+        if m:
+            defined_ids.add(m.group(1))
+
     rubrique_values = {}
     results = {}
     errors = []
+    warnings = []
+    missing_used = set()
 
     max_passes = len(pending) + 2
     for _ in range(max_passes):
@@ -385,7 +413,8 @@ def evaluate_sheet_formulas(ws, balance_n: "Balance", balance_n1: "Balance"):
         progress = False
         for cell, formula in pending:
             try:
-                value, rubrique_id = evaluate_formula(formula, balance_n, balance_n1, rubrique_values)
+                value, rubrique_id = evaluate_formula(
+                    formula, balance_n, balance_n1, rubrique_values, defined_ids, missing_used)
             except RubriqueNotReady:
                 still_pending.append((cell, formula))
                 continue
@@ -396,6 +425,11 @@ def evaluate_sheet_formulas(ws, balance_n: "Balance", balance_n1: "Balance"):
             results[cell.coordinate] = value
             if rubrique_id:
                 rubrique_values[rubrique_id] = value
+            if missing_used:
+                for rid in missing_used:
+                    warnings.append((cell.coordinate, formula,
+                                      "Rubrique [%s.EtLoc] jamais définie dans le modèle : traitée comme 0" % rid))
+                missing_used.clear()
             progress = True
         pending = still_pending
         if not progress:
@@ -405,7 +439,7 @@ def evaluate_sheet_formulas(ws, balance_n: "Balance", balance_n1: "Balance"):
     for cell, formula in pending:
         errors.append((cell.coordinate, formula, "Rubrique référencée jamais calculée (dépendance manquante)"))
 
-    return results, errors
+    return results, errors, warnings
 
 
 # --------------------------------------------------------------------------
@@ -506,49 +540,112 @@ def _guess_bilan_sheet(wb: openpyxl.Workbook, preferred: str = "BILAN") -> str:
 
 
 # --------------------------------------------------------------------------
-# 5. Génération du classeur Bilan à partir d'un modèle
+# 5. Génération des états financiers à partir d'un modèle
 # --------------------------------------------------------------------------
 
 @dataclass
 class GenerationReport:
     cells_ok: int = 0
     cells_error: list = field(default_factory=list)  # [(sheet, coord, formula, message)]
+    cells_warning: list = field(default_factory=list)  # [(sheet, coord, formula, message)]
     output_path: str = ""
 
 
-def generate_bilan(template_path: str, balance_n1_path: str, balance_n_path: str,
-                    output_path: str,
-                    sheet_n1: str = None, sheet_n: str = None,
-                    bilan_sheet: str = "BILAN") -> GenerationReport:
-    """Génère le fichier Bilan à partir du modèle et des deux balances.
+# Registre des 4 états gérés : identifiant technique, libellé affiché, nom du
+# fichier-ressource du modèle par défaut, feuille attendue dans le modèle, et
+# nom de fichier de sortie suggéré.
+ETATS = [
+    {"id": "bilan", "label": "Bilan", "resource": "modele_bilan.xlsx",
+     "sheet_hint": "BILAN", "output_name": "Bilan.xlsx"},
+    {"id": "resultat", "label": "Compte de Résultat (SIG)", "resource": "modele_resultat.xlsx",
+     "sheet_hint": "Feuil1", "output_name": "Compte_de_Resultat.xlsx"},
+    {"id": "situation", "label": "Situation Financière (FR-BFR-TN)", "resource": "modele_situation.xlsx",
+     "sheet_hint": "Feuil1", "output_name": "Situation_Financiere.xlsx"},
+    {"id": "flux", "label": "Flux de Trésorerie (TFT)", "resource": "modele_flux.xlsx",
+     "sheet_hint": "Feuil1", "output_name": "Flux_de_Tresorerie.xlsx"},
+]
 
-    - template_path : classeur contenant la feuille de Bilan avec les
-      formules CtaCptSolde... Accepte un .xlsx natif ou un ancien export XML
-      "SpreadsheetML" (souvent avec extension .xls). Les autres feuilles du
-      modèle, s'il y en a, sont recopiées telles quelles.
-    - balance_n1_path / balance_n_path : fichiers de balance (xlsx/csv) à
-      importer, avec colonnes Compte / Libellé / Débit / Crédit.
-    - output_path : fichier .xlsx de sortie.
-    - bilan_sheet : nom de la feuille contenant le Bilan dans le modèle ;
-      si introuvable, la feuille la plus riche en formules CtaCptSolde...
-      est utilisée automatiquement.
+
+def generate_etat_from_workbook(template_path: str, balance_n: "Balance", balance_n1: "Balance",
+                                 output_path: str, sheet_hint: str = "BILAN") -> GenerationReport:
+    """Génère UN état financier (peu importe lequel) à partir de son modèle et
+    de deux balances déjà chargées. C'est la fonction générique utilisée pour
+    le Bilan comme pour le Compte de Résultat, la Situation Financière ou le
+    Flux de Trésorerie — ces documents partagent le même langage de formules
+    (CtaCptSolde..., rubriques [xxx.EtLoc]).
     """
-    balance_n1 = load_balance(balance_n1_path, sheet_name=sheet_n1)
-    balance_n = load_balance(balance_n_path, sheet_name=sheet_n)
-
     wb = open_template_workbook(template_path)
-    actual_sheet = _guess_bilan_sheet(wb, preferred=bilan_sheet)
+    actual_sheet = _guess_bilan_sheet(wb, preferred=sheet_hint)
 
     report = GenerationReport(output_path=output_path)
     ws = wb[actual_sheet]
 
-    results, errors = evaluate_sheet_formulas(ws, balance_n, balance_n1)
+    results, errors, warnings = evaluate_sheet_formulas(ws, balance_n, balance_n1)
     for coord, value in results.items():
         ws[coord] = value
     report.cells_ok = len(results)
     for coord, formula, msg in errors:
         report.cells_error.append((actual_sheet, coord, formula, msg))
         ws[coord] = "#ERREUR"
+    for coord, formula, msg in warnings:
+        report.cells_warning.append((actual_sheet, coord, formula, msg))
 
     wb.save(output_path)
     return report
+
+
+def generate_bilan(template_path: str, balance_n1_path: str, balance_n_path: str,
+                    output_path: str,
+                    sheet_n1: str = None, sheet_n: str = None,
+                    bilan_sheet: str = "BILAN") -> GenerationReport:
+    """Génère le Bilan seul (conservé pour compatibilité). Voir
+    `generate_all_etats` pour générer les 4 états d'un coup."""
+    balance_n1 = load_balance(balance_n1_path, sheet_name=sheet_n1)
+    balance_n = load_balance(balance_n_path, sheet_name=sheet_n)
+    return generate_etat_from_workbook(template_path, balance_n, balance_n1, output_path, sheet_hint=bilan_sheet)
+
+
+def generate_all_etats(balance_n1_path: str, balance_n_path: str, output_dir: str,
+                        templates: dict, selected_ids: Optional[list] = None,
+                        sheet_n1: str = None, sheet_n: str = None) -> dict:
+    """Génère plusieurs états financiers en une seule fois, à partir des mêmes
+    deux balances (chargées une seule fois pour l'efficacité).
+
+    - templates : dict {etat_id: chemin_du_modèle} (ex. résolu par
+      l'application à partir des ressources embarquées, ou remplacé par un
+      modèle personnalisé choisi par l'utilisateur).
+    - selected_ids : sous-ensemble d'identifiants d'états à générer parmi
+      ceux du registre ETATS (par défaut : tous).
+    - output_dir : dossier où écrire chaque fichier de sortie (un fichier par
+      état, nommé selon `output_name` dans le registre ETATS).
+
+    Renvoie {etat_id: GenerationReport} (ou {etat_id: exception} en cas
+    d'échec total sur un état — les autres états continuent d'être générés).
+    """
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    balance_n1 = load_balance(balance_n1_path, sheet_name=sheet_n1)
+    balance_n = load_balance(balance_n_path, sheet_name=sheet_n)
+
+    selected = selected_ids if selected_ids is not None else [e["id"] for e in ETATS]
+    results = {}
+
+    for etat in ETATS:
+        if etat["id"] not in selected:
+            continue
+        template_path = templates.get(etat["id"])
+        if not template_path:
+            results[etat["id"]] = FileNotFoundError(
+                "Aucun modèle disponible pour '%s'." % etat["label"])
+            continue
+        output_path = str(Path(output_dir) / etat["output_name"])
+        try:
+            report = generate_etat_from_workbook(
+                template_path, balance_n, balance_n1, output_path,
+                sheet_hint=etat["sheet_hint"],
+            )
+            results[etat["id"]] = report
+        except Exception as e:  # un état en échec ne doit pas bloquer les autres
+            results[etat["id"]] = e
+
+    return results
