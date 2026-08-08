@@ -1,0 +1,45 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout du dépôt
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compiler l'exécutable avec PyInstaller
+        run: |
+          pyinstaller --noconfirm --onefile --windowed `
+            --name "BilanAutomatique" `
+            --add-data "resources;resources" `
+            main.py
+
+      - name: Publier l'exécutable (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: BilanAutomatique-windows
+          path: dist/BilanAutomatique.exe
+
+      - name: Créer une release GitHub (sur tag vX.Y.Z)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/BilanAutomatique.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
