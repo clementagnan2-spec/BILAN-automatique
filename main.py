@@ -14,6 +14,7 @@ import sys
 import tempfile
 import traceback
 import webbrowser
+from datetime import datetime
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -280,7 +281,7 @@ class EtatsApp(tk.Tk):
         self.template_vars = {}     # id -> StringVar ("" = modèle actif interne, sinon chemin externe choisi)
         self.template_labels = {}   # id -> StringVar (texte affiché : "par défaut" / "personnalisé" / chemin externe)
 
-        self._params_unlocked = False  # se reverrouille à chaque relance du logiciel
+        self._unlocked_role = None  # None | "utilisateur" | "admin" — se reverrouille à chaque relance
 
         self._build_menu()
         self._build_ui()
@@ -296,34 +297,74 @@ class EtatsApp(tk.Tk):
                 command=lambda eid=etat["id"]: self._open_template_editor(eid),
             )
         parametres_menu.add_separator()
+        parametres_menu.add_command(label="🔑 Mot de passe utilisateur du mois (Admin)",
+                                     command=self._show_user_password)
         parametres_menu.add_command(label="Verrouiller", command=self._lock_parametres)
         menubar.add_cascade(label="PARAMÈTRES", menu=parametres_menu)
 
         self.config(menu=menubar)
 
     def _lock_parametres(self):
-        self._params_unlocked = False
+        self._unlocked_role = None
         messagebox.showinfo("PARAMÈTRES", "Accès reverrouillé.")
 
     def _ensure_unlocked(self) -> bool:
-        """Demande le mot de passe du mois si l'accès à PARAMÈTRES n'a pas
-        déjà été déverrouillé dans cette session. Renvoie True si l'accès
-        est autorisé."""
-        if self._params_unlocked:
+        """Demande un mot de passe (utilisateur du mois OU administrateur) si
+        l'accès à PARAMÈTRES n'a pas déjà été déverrouillé dans cette
+        session. Renvoie True si l'accès est autorisé."""
+        if self._unlocked_role is not None:
             return True
         pwd = simpledialog.askstring(
             "PARAMÈTRES — Accès protégé",
-            "Mot de passe du mois en cours :",
+            "Mot de passe :",
             show="*",
             parent=self,
         )
         if pwd is None:
             return False  # annulé
-        if security.check_password(pwd):
-            self._params_unlocked = True
+        ok, role = security.check_any_password(pwd)
+        if ok:
+            self._unlocked_role = role
             return True
         messagebox.showerror("PARAMÈTRES", "Mot de passe incorrect.")
         return False
+
+    def _ensure_admin(self) -> bool:
+        """Exige spécifiquement le mot de passe Administrateur (même si un
+        accès « utilisateur » est déjà déverrouillé dans la session)."""
+        if self._unlocked_role == "admin":
+            return True
+        pwd = simpledialog.askstring(
+            "Accès Administrateur",
+            "Mot de passe administrateur :",
+            show="*",
+            parent=self,
+        )
+        if pwd is None:
+            return False
+        if security.check_admin_password(pwd):
+            self._unlocked_role = "admin"
+            return True
+        messagebox.showerror("PARAMÈTRES", "Mot de passe administrateur incorrect.")
+        return False
+
+    def _show_user_password(self):
+        if not self._ensure_admin():
+            return
+        now = datetime.now()
+        lines = []
+        for i in range(3):
+            year = now.year + (now.month - 1 + i) // 12
+            month = (now.month - 1 + i) % 12 + 1
+            when = datetime(year, month, 1)
+            pwd = security.generate_monthly_password(when=when)
+            suffix = "  ← ce mois-ci" if i == 0 else ""
+            lines.append(f"{when.strftime('%Y-%m')} : {pwd}{suffix}")
+        messagebox.showinfo(
+            "Mot de passe utilisateur du mois",
+            "Communiquez uniquement le mot de passe du mois en cours à vos utilisateurs :\n\n"
+            + "\n".join(lines),
+        )
 
     def _open_template_editor(self, etat_id: str):
         if not self._ensure_unlocked():

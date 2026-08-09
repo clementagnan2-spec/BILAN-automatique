@@ -63,6 +63,33 @@ def decrypt_bytes(data: bytes, secret: str = SECRET_KEY) -> bytes:
     return encrypt_bytes(data, secret)
 
 
+# Mot de passe Administrateur : fixe (ne change jamais tout seul), connu de
+# vous uniquement. Il donne accès à PARAMÈTRES comme le mot de passe
+# utilisateur mensuel, ET permet en plus de consulter le mot de passe
+# utilisateur du mois directement dans le logiciel (pas besoin de lancer
+# generer_mot_de_passe.py). Changez-le si besoin, gardez-le privé.
+ADMIN_PASSWORD = "ouaga2001@@@"
+
+
+def check_admin_password(entered: str) -> bool:
+    """Vérifie le mot de passe Administrateur (fixe, sensible à la casse,
+    espaces de début/fin ignorés)."""
+    if not entered:
+        return False
+    return entered.strip() == ADMIN_PASSWORD
+
+
+def check_any_password(entered: str, secret: str = SECRET_KEY, when: datetime = None):
+    """Vérifie `entered` contre le mot de passe Administrateur PUIS contre le
+    mot de passe utilisateur du mois. Renvoie (autorisé: bool, rôle: str|None)
+    où rôle vaut "admin" ou "utilisateur"."""
+    if check_admin_password(entered):
+        return True, "admin"
+    if check_password(entered, secret, when):
+        return True, "utilisateur"
+    return False, None
+
+
 def generate_monthly_password(secret: str = SECRET_KEY, when: datetime = None) -> str:
     """Génère le mot de passe du mois de `when` (aujourd'hui par défaut),
     de façon déterministe à partir de la clé secrète. Format lisible :

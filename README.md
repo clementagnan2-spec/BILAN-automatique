@@ -136,34 +136,41 @@ bilan-auto/
 ## Protection par mot de passe — formules cachées aux utilisateurs
 
 Le menu **PARAMÈTRES** (et le bouton « Modèle externe… ») est protégé par
-un mot de passe qui **change automatiquement chaque mois**, sans connexion
-internet. Sans ce mot de passe, un utilisateur ne peut ni voir ni modifier
-les formules des 4 modèles — il peut seulement importer ses balances et
-générer les états.
+mot de passe. **Deux niveaux d'accès** :
+
+| Rôle | Mot de passe | Donne accès à |
+|---|---|---|
+| **Utilisateur** | change automatiquement chaque mois (ex. `F1B9-2E41` en août 2026) | Ouvrir/modifier les 4 modèles via PARAMÈTRES |
+| **Administrateur** | fixe, défini par vous (`ADMIN_PASSWORD` dans `security.py`) | Tout ce que fait l'utilisateur, **+** consulter directement dans le logiciel le mot de passe utilisateur du mois (menu *PARAMÈTRES → 🔑 Mot de passe utilisateur du mois*) |
+
+Concrètement : vous vous connectez avec le mot de passe Administrateur, et
+le logiciel vous affiche lui-même le mot de passe Utilisateur du mois (et
+des 2 mois suivants) — plus besoin de lancer `generer_mot_de_passe.py` à la
+main. Vous communiquez ensuite ce mot de passe Utilisateur à vos
+utilisateurs (SMS, appel...), qui pourront l'utiliser pour ouvrir
+PARAMÈTRES ce mois-ci — le mois suivant, ce mot de passe change
+automatiquement.
 
 ### Avant de diffuser le logiciel
 
-1. Ouvrez `security.py` et changez la valeur de `SECRET_KEY` pour une
-   valeur que vous seul connaissez. Ne la communiquez à personne, ne la
-   publiez jamais (si votre dépôt GitHub est public, gardez ce fichier
-   dans un dépôt **privé**, ou changez la clé très régulièrement).
-2. Recompilez l'exe (poussez sur GitHub — voir plus haut).
+1. Ouvrez `security.py` :
+   - Changez `SECRET_KEY` (détermine le mot de passe Utilisateur mensuel)
+   - Changez `ADMIN_PASSWORD` si vous voulez un mot de passe Administrateur
+     différent de la valeur actuelle
+2. Gardez ces deux valeurs strictement privées (si votre dépôt GitHub est
+   public, gardez ce fichier dans un dépôt **privé**, ou changez les
+   valeurs très régulièrement).
+3. Recompilez l'exe (poussez sur GitHub — voir plus haut).
 
-### Connaître le mot de passe du mois
+### Consulter le mot de passe utilisateur sans ouvrir le logiciel
 
-Exécutez, sur votre poste (pas besoin de l'installer chez vos
-utilisateurs) :
+Vous pouvez aussi, sur votre poste, exécuter :
 ```bash
 python generer_mot_de_passe.py
 ```
-Cela affiche le mot de passe du mois en cours et des 2 mois suivants (pour
-pouvoir prévenir vos utilisateurs à l'avance). Communiquez-leur uniquement
-le mot de passe du mois en cours, par le canal de votre choix (SMS, appel,
-etc.) — **ne l'incluez jamais dans le logiciel lui-même**.
-
-`generer_mot_de_passe.py` n'est jamais inclus dans le `.exe` généré (il
-n'est pas importé par `main.py`), donc vos utilisateurs n'y ont pas accès
-même s'ils examinent les fichiers du logiciel.
+Ce script n'est jamais inclus dans le `.exe` généré (il n'est pas importé
+par `main.py`), donc vos utilisateurs n'y ont pas accès même s'ils
+examinent les fichiers du logiciel.
 
 ### Modèles personnalisés chiffrés sur disque
 
