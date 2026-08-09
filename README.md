@@ -192,6 +192,40 @@ inviolable, il faudrait une vérification côté serveur, ce qui dépasse le
 cadre d'un logiciel de bureau autonome. Pour l'usage décrit (empêcher des
 utilisateurs classiques de voir les formules), c'est largement suffisant.
 
+## Menu LIASSE FISCALE — fiche d'identification
+
+Le menu **LIASSE FISCALE** (accessible sans mot de passe — ce ne sont pas
+des formules à protéger) ouvre une page de saisie pour les 7 informations
+communes à toutes les feuilles de la liasse fiscale complète :
+
+- Dénomination sociale de l'entité
+- Adresse
+- N° IFU du contribuable
+- N° de télédéclarant (NES)
+- Sigle usuel
+- Durée (en mois)
+- Exercice clos le
+
+Dans le modèle de liasse fiscale (`resources/modele_liasse_fiscale.xlsx`),
+ces informations ne sont **pas ressaisies sur chaque feuille** : presque
+toutes les ~80 feuilles contiennent une formule qui pointe, directement ou
+par une chaîne de renvois, vers une poignée de cellules racines (feuille
+`GARDE`, principalement). Renseigner ces 7 champs une seule fois dans cette
+page suffit donc à les faire apparaître partout dans la liasse.
+
+- **💾 Enregistrer** conserve les valeurs saisies (fichier
+  `modeles_personnalises/liasse_fiscale_identite.json`, persistant d'un
+  lancement à l'autre — modifiable à tout moment).
+- **📄 Exporter le classeur…** applique ces informations au modèle de
+  liasse fiscale et enregistre le résultat à l'emplacement de votre choix.
+
+**Portée actuelle** : cette page couvre uniquement la fiche
+d'identification. Le calcul automatique du Bilan, du Compte de Résultat et
+des ~60 notes annexes *à l'intérieur* de la liasse fiscale complète (à
+partir de vos balances, comme le fait déjà le reste du logiciel pour les 4
+états séparés) n'est pas encore branché — c'est une extension possible,
+plus importante, à traiter séparément si besoin.
+
 ## Faire évoluer le modèle de Bilan
 
 Le modèle n'est pas codé en dur : le moteur lit **n'importe quelle**

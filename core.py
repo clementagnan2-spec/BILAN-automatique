@@ -44,6 +44,7 @@ import re
 import shutil
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -649,3 +650,92 @@ def generate_all_etats(balance_n1_path: str, balance_n_path: str, output_dir: st
             results[etat["id"]] = e
 
     return results
+
+
+# --------------------------------------------------------------------------
+# 6. Liasse Fiscale — fiche d'identification (7 champs communs à toutes les feuilles)
+# --------------------------------------------------------------------------
+#
+# Dans le modèle de Liasse Fiscale complet, ces 7 informations ne sont PAS
+# ressaisies sur chacune des ~80 feuilles : presque toutes les feuilles
+# contiennent une formule qui pointe, directement ou par une chaîne de
+# renvois (ex. NOTE 5!C3 -> 'NOTE 1'!C3 -> 'FICHE R4'!C3 -> GARDE!D22),
+# vers une poignée de cellules "racines". Il suffit donc de renseigner ces
+# cellules racines pour que l'information apparaisse partout dans la liasse.
+#
+# Exception : le champ "Durée (en mois)" n'existe nulle part sur la feuille
+# GARDE dans ce modèle — il est saisi en dur à deux endroits indépendants
+# (BILAN!N5 et FICHE R1!U5), chacun étant à l'origine de sa propre chaîne de
+# renvois. Les deux doivent donc être renseignés.
+#
+# Autre particularité du modèle fourni : le champ "Adresse" n'est PAS
+# raccordé par formule sur les feuilles FICHE R1 et FICHE R4 (cellules
+# fusionnées vides). Pour que l'adresse apparaisse malgré tout partout où
+# elle devrait, ces deux cellules sont également renseignées directement.
+
+LIASSE_IDENTITY_FIELDS = [
+    {"id": "denomination", "label": "Dénomination sociale de l'entité",
+     "targets": [("GARDE", "D22")], "type": "text"},
+    {"id": "adresse", "label": "Adresse",
+     "targets": [("GARDE", "C28"), ("FICHE R1", "D4"), ("FICHE R4", "B4")], "type": "text"},
+    {"id": "ifu", "label": "N° IFU du contribuable",
+     "targets": [("GARDE", "D30")], "type": "text"},
+    {"id": "nes", "label": "N° de télédéclarant (NES)",
+     "targets": [("GARDE", "D31")], "type": "text"},
+    {"id": "sigle", "label": "Sigle usuel",
+     "targets": [("GARDE", "C26")], "type": "text"},
+    {"id": "duree", "label": "Durée (en mois)",
+     "targets": [("BILAN", "N5"), ("FICHE R1", "U5")], "type": "int"},
+    {"id": "exercice_clos", "label": "Exercice clos le",
+     "targets": [("GARDE", "E17")], "type": "date"},
+]
+
+
+def _parse_date_fr(text: str):
+    text = (text or "").strip()
+    if not text:
+        return None
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def apply_liasse_identity(wb: openpyxl.Workbook, values: dict) -> list:
+    """Écrit les 7 champs d'identité dans les cellules racines du classeur
+    Liasse Fiscale (voir LIASSE_IDENTITY_FIELDS). `values` est un dict
+    {field_id: texte_saisi}. Renvoie la liste des (feuille, cellule)
+    réellement modifiées ; ignore silencieusement les feuilles absentes
+    (modèle personnalisé incomplet) plutôt que d'échouer."""
+    applied = []
+    for fld in LIASSE_IDENTITY_FIELDS:
+        raw = values.get(fld["id"], "")
+        raw = raw.strip() if isinstance(raw, str) else raw
+
+        value = raw
+        if fld["type"] == "int" and raw not in (None, ""):
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                value = raw  # on laisse tel quel plutôt que planter ; l'utilisateur corrigera
+        elif fld["type"] == "date" and raw not in (None, ""):
+            parsed = _parse_date_fr(raw)
+            value = parsed if parsed is not None else raw
+
+        for sheet_name, coord in fld["targets"]:
+            if sheet_name in wb.sheetnames:
+                wb[sheet_name][coord] = value
+                applied.append((sheet_name, coord))
+    return applied
+
+
+def generate_liasse_identity(template_path: str, values: dict, output_path: str) -> list:
+    """Charge le modèle de Liasse Fiscale, y applique la fiche
+    d'identification, et enregistre le résultat. Renvoie la liste des
+    cellules modifiées."""
+    wb = open_template_workbook(template_path)
+    applied = apply_liasse_identity(wb, values)
+    wb.save(output_path)
+    return applied

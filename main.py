@@ -8,6 +8,7 @@ CtaCptSolde... et les rubriques [xxx.EtLoc].
 """
 
 import io
+import json
 import os
 import shutil
 import sys
@@ -114,6 +115,44 @@ def materialize_temp_template(etat_id: str):
     tmp_path = os.path.join(tmp_dir, "modele.xlsx")
     wb.save(tmp_path)
     return tmp_path, tmp_dir
+
+
+# --------------------------------------------------------------------------
+# Liasse Fiscale — fiche d'identification (page dédiée, sans mot de passe :
+# ce ne sont pas des formules à protéger, juste des informations que
+# l'utilisateur doit pouvoir modifier à tout moment)
+# --------------------------------------------------------------------------
+
+LIASSE_TEMPLATE_RESOURCE = "modele_liasse_fiscale.xlsx"
+
+
+def liasse_identity_json_path() -> str:
+    return os.path.join(user_config_dir(), "liasse_fiscale_identite.json")
+
+
+def load_liasse_identity_values() -> dict:
+    path = liasse_identity_json_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_liasse_identity_values(values: dict) -> None:
+    path = liasse_identity_json_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(values, f, ensure_ascii=False, indent=2)
+
+
+def liasse_template_path() -> str:
+    """Modèle actif de la Liasse Fiscale (personnalisé si présent via une
+    future édition, sinon le modèle par défaut embarqué)."""
+    default_path = resource_path(os.path.join("resources", LIASSE_TEMPLATE_RESOURCE))
+    return default_path
 
 
 class TemplateEditorWindow(tk.Toplevel):
@@ -264,7 +303,114 @@ class TemplateEditorWindow(tk.Toplevel):
         self.status_var.set("Modèle d'origine restauré.")
 
 
-class EtatsApp(tk.Tk):
+class LiasseIdentiteWindow(tk.Toplevel):
+    """Page d'édition de la fiche d'identification de la Liasse Fiscale : les
+    7 informations communes à toutes les feuilles de la liasse (dénomination,
+    adresse, IFU, NES, sigle, durée, exercice clos), saisies une seule fois
+    puis appliquées automatiquement partout où elles apparaissent."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent_app = parent
+
+        self.title("Liasse Fiscale — Fiche d'identification")
+        self.geometry("640x480")
+        self.resizable(False, False)
+
+        self.vars = {fld["id"]: tk.StringVar() for fld in core.LIASSE_IDENTITY_FIELDS}
+
+        self._build_ui()
+        self._load_values()
+
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        pad = {"padx": 12, "pady": 6}
+
+        ttk.Label(
+            self,
+            text="Ces informations apparaissent sur toutes les feuilles de la liasse "
+                 "(BILAN, RESULTAT, TFT, notes annexes, fiches R1-R4...). "
+                 "Renseignez-les une seule fois ici.",
+            wraplength=600, justify="left",
+        ).pack(anchor="w", **pad)
+
+        form = ttk.Frame(self)
+        form.pack(fill="both", expand=True, padx=12, pady=6)
+
+        hints = {
+            "exercice_clos": "format JJ/MM/AAAA, ex. 31/12/2025",
+            "duree": "en mois, ex. 12",
+        }
+
+        for fld in core.LIASSE_IDENTITY_FIELDS:
+            row = ttk.Frame(form)
+            row.pack(fill="x", pady=6)
+            ttk.Label(row, text=fld["label"] + " :", width=34, anchor="w").pack(side="left")
+            entry = ttk.Entry(row, textvariable=self.vars[fld["id"]])
+            entry.pack(side="left", fill="x", expand=True)
+            if fld["id"] in hints:
+                ttk.Label(row, text=hints[fld["id"]], foreground="#888888").pack(side="left", padx=6)
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=12, pady=12)
+        ttk.Button(btns, text="💾 Enregistrer", command=self._on_save).pack(side="left")
+        ttk.Button(btns, text="📄 Exporter le classeur…", command=self._on_export).pack(side="left", padx=8)
+        ttk.Button(btns, text="Fermer", command=self.destroy).pack(side="left")
+
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w").pack(fill="x", side="bottom")
+
+    # ------------------------------------------------------------------
+    def _load_values(self):
+        saved = load_liasse_identity_values()
+        for fld in core.LIASSE_IDENTITY_FIELDS:
+            self.vars[fld["id"]].set(saved.get(fld["id"], ""))
+
+    def _collect_values(self) -> dict:
+        return {fid: var.get() for fid, var in self.vars.items()}
+
+    def _on_save(self):
+        values = self._collect_values()
+        try:
+            save_liasse_identity_values(values)
+        except Exception as e:
+            messagebox.showerror("Liasse Fiscale", f"Échec de l'enregistrement :\n{e}")
+            return
+        self.status_var.set("Informations enregistrées.")
+        messagebox.showinfo("Liasse Fiscale", "Les informations ont été enregistrées. "
+                                               "Utilisez « Exporter le classeur… » pour produire le fichier.")
+
+    def _on_export(self):
+        values = self._collect_values()
+        save_liasse_identity_values(values)  # on enregistre aussi au passage
+
+        out_path = filedialog.asksaveasfilename(
+            title="Exporter la Liasse Fiscale",
+            defaultextension=".xlsx",
+            filetypes=[("Classeur Excel", "*.xlsx")],
+            initialfile="Liasse_Fiscale.xlsx",
+        )
+        if not out_path:
+            return
+
+        try:
+            applied = core.generate_liasse_identity(liasse_template_path(), values, out_path)
+        except Exception as e:
+            messagebox.showerror("Liasse Fiscale", f"Échec de l'export :\n{e}")
+            return
+
+        self.status_var.set(f"Exporté : {out_path} ({len(applied)} cellules mises à jour).")
+        messagebox.showinfo(
+            "Liasse Fiscale",
+            f"Fichier exporté :\n{out_path}\n\n"
+            "Remarque : seule la fiche d'identification est renseignée à ce stade. "
+            "Le calcul automatique du Bilan/Résultat/Notes annexes de la Liasse "
+            "Fiscale complète (à partir de vos balances) n'est pas encore activé "
+            "dans cette page.",
+        )
+
+
+
     def __init__(self):
         super().__init__()
         self.title(f"{APP_TITLE} — v{APP_VERSION}")
@@ -290,6 +436,10 @@ class EtatsApp(tk.Tk):
     def _build_menu(self):
         menubar = tk.Menu(self)
 
+        liasse_menu = tk.Menu(menubar, tearoff=0)
+        liasse_menu.add_command(label="Fiche d'identification…", command=self._open_liasse_identite)
+        menubar.add_cascade(label="LIASSE FISCALE", menu=liasse_menu)
+
         parametres_menu = tk.Menu(menubar, tearoff=0)
         for etat in core.ETATS:
             parametres_menu.add_command(
@@ -303,6 +453,9 @@ class EtatsApp(tk.Tk):
         menubar.add_cascade(label="PARAMÈTRES", menu=parametres_menu)
 
         self.config(menu=menubar)
+
+    def _open_liasse_identite(self):
+        LiasseIdentiteWindow(self)
 
     def _lock_parametres(self):
         self._unlocked_role = None
