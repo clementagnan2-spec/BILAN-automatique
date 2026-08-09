@@ -757,7 +757,7 @@ def generate_liasse_identity(template_path: str, values: dict, output_path: str)
 # autres, chacune avec son propre espace de rubriques) et applique en plus
 # la fiche d'identification.
 
-LIASSE_ETATS_SHEETS = ["BILAN", "RESULTAT", "TFT"]
+LIASSE_ETATS_SHEETS = ["BILAN", "RESULTAT", "TFT", "NOTE 34"]
 
 
 def generate_liasse_complete(template_path: str, balance_n_path: str, balance_n1_path: str,

@@ -236,6 +236,14 @@ comptes SYSCOHADA déjà validés dans les 4 petits modèles.
   s'y sont révélées strictement identiques (donc aucune variation N/N-1
   réelle à mesurer) — cela fonctionnera normalement avec de vraies
   données N-1 distinctes.
+- **NOTE 34** (Situation Financière — indicateurs, CAFG, FR-BFR-TN) : cette
+  feuille du modèle officiel contenait déjà de vraies formules Excel
+  pointant vers BILAN/RESULTAT/TFT (ex. ratios de rentabilité) ; les
+  cellules manquantes ont été complétées de la même façon (références
+  Excel directes vers les 3 autres feuilles calculées, plus quelques
+  comptes CtaCptSolde pour la chaîne de la CAFG). Cohérence vérifiée :
+  Trésorerie nette = Contrôle trésorerie à l'euro près, Variation de
+  trésorerie = TFT à l'euro près.
 
 **Limite à connaître** : le mapping comptable REF-code → comptes SYSCOHADA
 pour ces 3 états est un travail de reconstruction (le modèle officiel
@@ -246,8 +254,9 @@ immobilisations incorporelles, quelques provisions) restent estimées et
 méritent une relecture avant tout usage officiel — voir
 `liasse_build/confiance.json` dans l'historique de développement pour le
 détail ligne par ligne (« validé » vs « estimé » vs « absent »). Les
-~60 notes annexes détaillées de la liasse ne sont pas couvertes par ce
-calcul automatique (seuls BILAN, RESULTAT et TFT le sont).
+autres notes annexes détaillées de la liasse (hors NOTE 34) ne sont pas
+couvertes par ce calcul automatique (seuls BILAN, RESULTAT, TFT et
+NOTE 34/Situation Financière le sont).
 
 ## Faire évoluer le modèle de Bilan
 
