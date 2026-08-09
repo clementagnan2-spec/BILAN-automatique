@@ -144,7 +144,6 @@ def load_balance(path: str, sheet_name: Optional[str] = None) -> Balance:
         )
 
     bal = Balance()
-    n_cols = len(header)
     for row in data_rows.itertuples(index=False, name=None):
         compte_raw = row[colmap["compte"]] if colmap["compte"] < len(row) else None
         if compte_raw is None or (isinstance(compte_raw, float) and compte_raw != compte_raw):
@@ -152,7 +151,6 @@ def load_balance(path: str, sheet_name: Optional[str] = None) -> Balance:
         compte = str(compte_raw).strip()
         if compte == "" or compte.lower() == "nan":
             continue
-        # normaliser un compte du type "401100.0" -> "401100"
         if compte.endswith(".0"):
             compte = compte[:-2]
 

@@ -44,7 +44,9 @@ Chaque modèle contient des cellules-formules du type
 
 Le solde d'un compte est calculé comme **Débit − Crédit** sur les lignes de
 la balance importée (les lignes en double pour un même compte sont
-additionnées automatiquement).
+additionnées automatiquement). Vos fichiers de balance doivent respecter la
+convention standard (Débit et Crédit toujours ≥ 0 — jamais de montant
+négatif dans ces colonnes).
 
 Le moteur résout les formules en **plusieurs passes** : une cellule qui
 référence une rubrique `[Rxxx.EtLoc]` pas encore calculée est simplement
