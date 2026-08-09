@@ -219,12 +219,35 @@ page suffit donc à les faire apparaître partout dans la liasse.
 - **📄 Exporter le classeur…** applique ces informations au modèle de
   liasse fiscale et enregistre le résultat à l'emplacement de votre choix.
 
-**Portée actuelle** : cette page couvre uniquement la fiche
-d'identification. Le calcul automatique du Bilan, du Compte de Résultat et
-des ~60 notes annexes *à l'intérieur* de la liasse fiscale complète (à
-partir de vos balances, comme le fait déjà le reste du logiciel pour les 4
-états séparés) n'est pas encore branché — c'est une extension possible,
-plus importante, à traiter séparément si besoin.
+**Portée actuelle** : cette page couvre la fiche d'identification, **et
+génère aussi automatiquement le Bilan, le Compte de Résultat et le Tableau
+des Flux de Trésorerie de la liasse complète** à partir de vos balances
+(bouton « ⚙ Générer la Liasse Fiscale complète… »), en réutilisant les
+comptes SYSCOHADA déjà validés dans les 4 petits modèles.
+
+**Résultats de validation** (données réelles fournies) :
+- **BILAN** : équilibre Actif = Passif **parfait** (écart nul), et total
+  identique au petit modèle "Bilan Synthétique" déjà validé séparément.
+- **RESULTAT** : Résultat Net Comptable identique à la décimale près au
+  Résultat calculé dans le Bilan.
+- **TFT** : structure et sommes internes cohérentes (zéro erreur de
+  formule) ; n'a pas pu être validé numériquement avec l'échantillon
+  fourni car ses deux feuilles de balance (`Balance` et `Balance 2023 (2)`)
+  s'y sont révélées strictement identiques (donc aucune variation N/N-1
+  réelle à mesurer) — cela fonctionnera normalement avec de vraies
+  données N-1 distinctes.
+
+**Limite à connaître** : le mapping comptable REF-code → comptes SYSCOHADA
+pour ces 3 états est un travail de reconstruction (le modèle officiel
+fourni ne contenait aucune formule d'origine, contrairement aux 4 petits
+modèles). La majorité des lignes réutilisent des comptes déjà validés ;
+quelques lignes de détail (ex. répartition fine de certaines
+immobilisations incorporelles, quelques provisions) restent estimées et
+méritent une relecture avant tout usage officiel — voir
+`liasse_build/confiance.json` dans l'historique de développement pour le
+détail ligne par ligne (« validé » vs « estimé » vs « absent »). Les
+~60 notes annexes détaillées de la liasse ne sont pas couvertes par ce
+calcul automatique (seuls BILAN, RESULTAT et TFT le sont).
 
 ## Faire évoluer le modèle de Bilan
 
@@ -239,9 +262,11 @@ nécessaire.
 ## Menu PARAMÈTRES — modifier les modèles directement dans le logiciel
 
 Pas besoin d'Excel : le menu **PARAMÈTRES**, en haut de la fenêtre, liste
-les 4 états. Cliquer sur l'un d'eux ouvre une grille (comme un mini-tableur)
-affichant toutes les cellules du modèle — libellés et formules, colonnes
-année N **et** année N-1 comprises.
+les 4 états simples **et la Liasse Fiscale** (sous-menu séparé, avec accès
+direct aux 3 feuilles calculées : BILAN, RESULTAT, TFT). Cliquer sur l'un
+d'eux ouvre une grille (comme un mini-tableur) affichant toutes les
+cellules du modèle — libellés et formules, colonnes année N **et** année
+N-1 comprises.
 
 - Modifiez n'importe quelle cellule (un libellé, ou une formule comme
   `=CtaCptSoldeDébit("42*")`, `=CtaCptSoldeDébitNm1("42*")` pour le N-1, ou

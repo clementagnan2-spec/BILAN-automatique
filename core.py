@@ -93,14 +93,18 @@ def _find_header_row(raw: pd.DataFrame) -> int:
     return 0
 
 
-def _map_columns(columns) -> dict:
+def _map_columns(header_list) -> dict:
+    """Reçoit la liste des en-têtes (dans l'ordre) et renvoie {clé: index_colonne}.
+    Fonctionne par POSITION plutôt que par nom, pour ne pas être piégé par des
+    en-têtes dupliqués (ex. plusieurs colonnes 'Débit'/'Crédit' successives,
+    typiquement report à nouveau / mouvements / solde). En cas de doublon, la
+    DERNIÈRE occurrence l'emporte (c'est en général le solde final)."""
     mapping = {}
-    norm_cols = {str(c).strip().lower(): c for c in columns}
-    for key, aliases in REQUIRED_COLS.items():
-        for alias in aliases:
-            if alias in norm_cols:
-                mapping[key] = norm_cols[alias]
-                break
+    for idx, col in enumerate(header_list):
+        norm = str(col).strip().lower()
+        for key, aliases in REQUIRED_COLS.items():
+            if norm in aliases:
+                mapping[key] = idx  # dernière occurrence gagne (écrasement volontaire)
     return mapping
 
 
@@ -129,10 +133,9 @@ def load_balance(path: str, sheet_name: Optional[str] = None) -> Balance:
 
     header_row = _find_header_row(raw)
     header = raw.iloc[header_row].tolist()
-    data = raw.iloc[header_row + 1:].copy()
-    data.columns = header
+    data_rows = raw.iloc[header_row + 1:]
 
-    colmap = _map_columns(data.columns)
+    colmap = _map_columns(header)
     missing = [k for k in ("compte", "debit", "credit") if k not in colmap]
     if missing:
         raise ValueError(
@@ -141,8 +144,9 @@ def load_balance(path: str, sheet_name: Optional[str] = None) -> Balance:
         )
 
     bal = Balance()
-    for _, row in data.iterrows():
-        compte_raw = row.get(colmap["compte"])
+    n_cols = len(header)
+    for row in data_rows.itertuples(index=False, name=None):
+        compte_raw = row[colmap["compte"]] if colmap["compte"] < len(row) else None
         if compte_raw is None or (isinstance(compte_raw, float) and compte_raw != compte_raw):
             continue
         compte = str(compte_raw).strip()
@@ -152,9 +156,10 @@ def load_balance(path: str, sheet_name: Optional[str] = None) -> Balance:
         if compte.endswith(".0"):
             compte = compte[:-2]
 
-        debit = _to_float(row.get(colmap["debit"]))
-        credit = _to_float(row.get(colmap["credit"]))
-        libelle = str(row.get(colmap.get("libelle"), "") or "")
+        debit = _to_float(row[colmap["debit"]]) if colmap["debit"] < len(row) else 0.0
+        credit = _to_float(row[colmap["credit"]]) if colmap["credit"] < len(row) else 0.0
+        lib_idx = colmap.get("libelle")
+        libelle = str(row[lib_idx]) if lib_idx is not None and lib_idx < len(row) and row[lib_idx] is not None else ""
 
         bal.soldes[compte] = bal.soldes.get(compte, 0.0) + (debit - credit)
         if compte not in bal.libelles and libelle and libelle.lower() != "nan":
@@ -261,8 +266,8 @@ _FUNC_TOKENS = [
 # du même identifiant sur plusieurs lignes, la dernière définition
 # rencontrée (dans l'ordre des lignes) fait foi pour les références
 # suivantes — ce qui correspond à l'intention des modèles observés.
-_RUBRIQUE_REF_RE = re.compile(r"\[([A-Za-z0-9]+)\.EtLoc\]")
-_RUBRIQUE_ASSIGN_RE = re.compile(r"^\[([A-Za-z0-9]+)\.EtLoc\]=(.*)$")
+_RUBRIQUE_REF_RE = re.compile(r"\[([A-Za-z0-9_]+)\.EtLoc\]")
+_RUBRIQUE_ASSIGN_RE = re.compile(r"^\[([A-Za-z0-9_]+)\.EtLoc\]=(.*)$")
 
 
 class FormulaError(Exception):
@@ -739,3 +744,57 @@ def generate_liasse_identity(template_path: str, values: dict, output_path: str)
     applied = apply_liasse_identity(wb, values)
     wb.save(output_path)
     return applied
+
+
+# --------------------------------------------------------------------------
+# 7. Liasse Fiscale — génération complète (BILAN + RESULTAT + TFT + identité)
+# --------------------------------------------------------------------------
+#
+# Le modèle de Liasse Fiscale complet embarque, sur les feuilles BILAN,
+# RESULTAT et TFT, les mêmes formules CtaCptSolde.../rubriques que les 4
+# petits modèles — préparées à partir des comptes SYSCOHADA déjà validés.
+# Cette fonction évalue ces trois feuilles (indépendamment les unes des
+# autres, chacune avec son propre espace de rubriques) et applique en plus
+# la fiche d'identification.
+
+LIASSE_ETATS_SHEETS = ["BILAN", "RESULTAT", "TFT"]
+
+
+def generate_liasse_complete(template_path: str, balance_n_path: str, balance_n1_path: str,
+                              output_path: str, identity_values: dict = None,
+                              sheet_n: str = None, sheet_n1: str = None) -> dict:
+    """Génère la Liasse Fiscale complète : calcule BILAN, RESULTAT et TFT à
+    partir des balances fournies, applique la fiche d'identification si
+    fournie, et enregistre le résultat.
+
+    Renvoie {sheet_name: GenerationReport} pour BILAN/RESULTAT/TFT, plus
+    la clé "identite" -> liste des cellules d'identité modifiées (si
+    `identity_values` est fourni).
+    """
+    balance_n = load_balance(balance_n_path, sheet_name=sheet_n)
+    balance_n1 = load_balance(balance_n1_path, sheet_name=sheet_n1)
+
+    wb = open_template_workbook(template_path)
+    reports = {}
+
+    for sheet_name in LIASSE_ETATS_SHEETS:
+        if sheet_name not in wb.sheetnames:
+            continue
+        ws = wb[sheet_name]
+        report = GenerationReport(output_path=output_path)
+        results, errors, warnings = evaluate_sheet_formulas(ws, balance_n, balance_n1)
+        for coord, value in results.items():
+            ws[coord] = value
+        report.cells_ok = len(results)
+        for coord, formula, msg in errors:
+            report.cells_error.append((sheet_name, coord, formula, msg))
+            ws[coord] = "#ERREUR"
+        for coord, formula, msg in warnings:
+            report.cells_warning.append((sheet_name, coord, formula, msg))
+        reports[sheet_name] = report
+
+    if identity_values:
+        reports["identite"] = apply_liasse_identity(wb, identity_values)
+
+    wb.save(output_path)
+    return reports
